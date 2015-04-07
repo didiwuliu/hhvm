@@ -36,13 +36,12 @@ public:
 
   explicit ExpressionList(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                           ListKind kind = ListKindParam);
-
+  ~ExpressionList();
   // change case to lower so to make it case insensitive
   void toLower();
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
   ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
-  ExpressionPtr postOptimize(AnalysisResultConstPtr ar);
 
   virtual void setContext(Context context);
   void setListKind(ListKind kind) { m_kind = kind; }
@@ -71,10 +70,12 @@ public:
   void getOriginalStrings(std::vector<std::string> &strings);
   void stripConcat();
 
-  void markParam(int p, bool noRefWrapper);
-  void markParams(bool noRefWrapper);
+  void markParam(int p);
+  void markParams();
 
-  void setCollectionType(Collection::Type cType);
+  void setCollectionElems();
+  void setContainsUnpack() { m_argUnpack = true; };
+  bool containsUnpack() const { return m_argUnpack; }
 
   virtual bool canonCompare(ExpressionPtr e) const;
 
@@ -88,10 +89,12 @@ public:
 private:
   void optimize(AnalysisResultConstPtr ar);
   unsigned int checkLitstrKeys() const;
+  enum class ElemsKind: uint8_t { None, ArrayPairs, Collection };
 
+private:
   ExpressionPtrVec m_exps;
-  bool m_arrayElements;
-  int m_collectionType;
+  ElemsKind m_elems_kind;
+  bool m_argUnpack;
   ListKind m_kind;
 };
 

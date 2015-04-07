@@ -17,14 +17,15 @@
 
 #include "hphp/vixl/a64/macro-assembler-a64.h"
 
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/vm/jit/abi-arm.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers-arm.h"
-#include "hphp/runtime/vm/jit/jump-smash.h"
+#include "hphp/runtime/vm/jit/back-end.h"
 #include "hphp/runtime/vm/jit/service-requests-arm.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 
-namespace HPHP { namespace JIT { namespace ARM {
+namespace HPHP { namespace jit { namespace arm {
 
 
 //////////////////////////////////////////////////////////////////////
@@ -39,9 +40,9 @@ void emitStackCheck(int funcDepth, Offset pc) {
   a.   And  (rAsm, rVmSp, stackMask);
   a.   Sub  (rAsm, rAsm, funcDepth + Stack::sSurprisePageSize, vixl::SetFlags);
   // This doesn't need to be smashable, but it is a long jump from mainCode to
-  // stubs, so it can't be direct.
-  emitSmashableJump(mcg->code.main(), tx->uniqueStubs.stackOverflowHelper,
-                    CC_L);
+  // cold, so it can't be direct.
+  mcg->backEnd().emitSmashableJump(
+    mcg->code.main(), mcg->tx().uniqueStubs.stackOverflowHelper, CC_L);
 }
 
 TCA emitFuncGuard(vixl::MacroAssembler& a, Func* func) {
@@ -60,18 +61,18 @@ TCA emitFuncGuard(vixl::MacroAssembler& a, Func* func) {
 
   if (!a.isFrontierAligned(8)) {
     a. Nop   ();
-    assert(a.isFrontierAligned(8));
+    assertx(a.isFrontierAligned(8));
   }
   a.   bind  (&redispatchStubAddr);
-  a.   dc64  (tx->uniqueStubs.funcPrologueRedispatch);
+  a.   dc64  (mcg->tx().uniqueStubs.funcPrologueRedispatch);
   // The guarded Func* comes right before the end so that
   // funcPrologueToGuardImmPtr() is simple.
   a.   bind  (&funcAddr);
   a.   dc64  (func);
   a.   bind  (&success);
 
-  assert(funcPrologueToGuard(a.frontier(), func) == start);
-  assert(funcPrologueHasGuard(a.frontier(), func));
+  assertx(funcPrologueToGuard(a.frontier(), func) == start);
+  assertx(funcPrologueHasGuard(a.frontier(), func));
 
   return a.frontier();
 }
@@ -81,52 +82,70 @@ constexpr auto kLocalsToInitializeInline = 9;
 SrcKey emitPrologueWork(Func* func, int nPassed) {
   vixl::MacroAssembler a { mcg->code.main() };
 
-  if (tx->mode() == TransProflogue) {
+  if (mcg->tx().mode() == TransKind::Proflogue) {
     not_implemented();
   }
 
   auto dvInitializer = InvalidAbsoluteOffset;
-  auto const numParams = func->numParams();
+  auto const numNonVariadicParams = func->numNonVariadicParams();
   auto const& paramInfo = func->params();
 
   // Resolve cases where the wrong number of args was passed.
-  if (nPassed > numParams) {
-    void (*helper)(ActRec*) = JIT::trimExtraArgs;
-    a.  Mov    (argReg(0), rStashedAR);
-    emitCall(a, CppCall(helper));
-    // We'll fix rVmSp below.
-  } else if (nPassed < numParams) {
-    for (auto i = nPassed; i < numParams; ++i) {
-      auto const& pi = paramInfo[i];
-      if (pi.hasDefaultValue()) {
-        dvInitializer = pi.funcletOff();
-        break;
-      }
+  if (nPassed > numNonVariadicParams) {
+    void (*helper)(ActRec*);
+    if (func->attrs() & AttrMayUseVV) {
+      helper = func->hasVariadicCaptureParam()
+        ? jit::shuffleExtraArgsVariadicAndVV
+        : jit::shuffleExtraArgsMayUseVV;
+    } else if (func->hasVariadicCaptureParam()) {
+      helper = jit::shuffleExtraArgsVariadic;
+    } else {
+      helper = jit::trimExtraArgs;
     }
+    a.  Mov    (argReg(0), rStashedAR);
+    emitCall(a, CppCall::direct(helper));
+    // We'll fix rVmSp below.
+  } else {
+    if (nPassed < numNonVariadicParams) {
+      for (auto i = nPassed; i < numNonVariadicParams; ++i) {
+        auto const& pi = paramInfo[i];
+        if (pi.hasDefaultValue()) {
+          dvInitializer = pi.funcletOff;
+          break;
+        }
+      }
 
-    a.  Mov    (rAsm, nPassed);
+      a.  Mov    (rAsm, nPassed);
 
-    // do { *(--rVmSp) = NULL; nPassed++; } while (nPassed < numParams);
-    vixl::Label loopTop;
-    a.  bind   (&loopTop);
-    a.  Sub    (rVmSp, rVmSp, sizeof(Cell));
-    a.  Add    (rAsm, rAsm, 1);
-    static_assert(KindOfUninit == 0, "need this for zero-register hack");
-    a.  Strb   (vixl::xzr, rVmSp[TVOFF(m_type)]);
-    a.  Cmp    (rAsm, numParams);
-    a.  B      (&loopTop, vixl::lt);
+      // do { *(--rVmSp) = NULL; nPassed++; }
+      // while (nPassed < numNonVariadicParams);
+      vixl::Label loopTop;
+      a.  bind   (&loopTop);
+      a.  Sub    (rVmSp, rVmSp, sizeof(Cell));
+      a.  Add    (rAsm, rAsm, 1);
+      static_assert(KindOfUninit == 0, "need this for zero-register hack");
+      a.  Strb   (vixl::xzr, rVmSp[TVOFF(m_type)]);
+      a.  Cmp    (rAsm, numNonVariadicParams);
+      a.  B      (&loopTop, vixl::lt);
+    }
+    if (func->hasVariadicCaptureParam()) {
+      a.  Mov   (rAsm, KindOfArray);
+      a.  Strb  (rAsm.W(), rVmSp[TVOFF(m_type) - sizeof(Cell)]);
+      a.  Mov   (rAsm, uint64_t(staticEmptyArray()));
+      a.  Str   (rAsm, rVmSp[TVOFF(m_data) - sizeof(Cell)]);
+    }
   }
 
   // Frame linkage.
   a.    Mov    (rVmFp, rStashedAR);
 
-  auto numLocals = numParams;
+  auto numLocals = func->numParams();
 
   if (func->isClosureBody()) {
     int numUseVars = func->cls()->numDeclProperties() -
                      func->numStaticLocals();
 
-    emitRegGetsRegPlusImm(a, rVmSp, rVmFp, -cellsToBytes(numParams));
+    emitRegGetsRegPlusImm(a, rVmSp, rVmFp, -cellsToBytes(numLocals));
 
     // This register needs to live a long time, across calls to helpers that may
     // use both rAsm and rAsm2. So it can't be one of them. Fortunately, we're
@@ -184,8 +203,8 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
     numLocals += numUseVars + 1;
   }
 
+  assertx(func->numLocals() >= numLocals);
   auto numUninitLocals = func->numLocals() - numLocals;
-  assert(numUninitLocals >= 0);
   if (numUninitLocals > 0) {
     if (numUninitLocals > kLocalsToInitializeInline) {
       auto const& loopReg = rAsm2;
@@ -208,8 +227,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       a.  B     (&loopTop, vixl::ne);
     } else {
       for (auto k = numLocals; k < func->numLocals(); ++k) {
-        int disp =
-          cellsToBytes(locPhysicalOffset(Location(Location::Local, k), func));
+        int disp = cellsToBytes(locPhysicalOffset(k));
         a.Strb  (vixl::xzr, rVmFp[disp + TVOFF(m_type)]);
       }
     }
@@ -219,7 +237,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
   if (dvInitializer != InvalidAbsoluteOffset) {
     destPC = func->unit()->entry() + dvInitializer;
   }
-  SrcKey funcBody(func, destPC);
+  SrcKey funcBody(func, destPC, false);
 
   // Set stack pointer just past all locals
   int frameCells = func->numSlotsInFrame();
@@ -229,13 +247,13 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 
   // Emit warnings for missing arguments
   if (!func->isCPPBuiltin()) {
-    for (auto i = nPassed; i < numParams; ++i) {
-      if (paramInfo[i].funcletOff() == InvalidAbsoluteOffset) {
-        a.  Mov  (argReg(0), func->name()->data());
-        a.  Mov  (argReg(1), numParams);
-        a.  Mov  (argReg(2), i);
-        auto fixupAddr = emitCall(a, CppCall(JIT::raiseMissingArgument));
-        mcg->fixupMap().recordFixup(fixupAddr, fixup);
+    for (auto i = nPassed; i < numNonVariadicParams; ++i) {
+      if (paramInfo[i].funcletOff == InvalidAbsoluteOffset) {
+        a.  Mov  (argReg(0), func);
+        a.  Mov  (argReg(1), nPassed);
+        auto fixupAddr = emitCall(a,
+          CppCall::direct(jit::raiseMissingArgument));
+        mcg->recordSyncPoint(fixupAddr, fixup.pcOffset, fixup.spOffset);
         break;
       }
     }
@@ -244,17 +262,17 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
   // Check surprise flags in the same place as the interpreter: after
   // setting up the callee's frame but before executing any of its
   // code
-  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.stubs(), false,
-                              mcg->fixupMap(), fixup);
+  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.cold(), rVmTl, fixup);
 
   if (func->isClosureBody() && func->cls()) {
-    int entry = nPassed <= numParams ? nPassed : numParams + 1;
+    int entry = nPassed <= numNonVariadicParams
+      ? nPassed : numNonVariadicParams + 1;
     // Relying on rStashedAR == rVmFp here
     a.   Ldr   (rAsm, rStashedAR[AROFF(m_func)]);
     a.   Ldr   (rAsm, rAsm[Func::prologueTableOff() + sizeof(TCA)*entry]);
     a.   Br    (rAsm);
   } else {
-    emitBindJmp(mcg->code.main(), mcg->code.stubs(), funcBody);
+    emitBindJ(mcg->code.main(), mcg->code.frozen(), CC_None, funcBody);
   }
   return funcBody;
 }
@@ -278,12 +296,13 @@ int shuffleArgsForMagicCall(ActRec* ar) {
   }
   const Func* f UNUSED = ar->m_func;
   f->validate();
-  assert(f->name()->isame(s_call.get())
+  assertx(f->name()->isame(s_call.get())
          || f->name()->isame(s_callStatic.get()));
-  assert(f->numParams() == 2);
-  assert(ar->hasInvName());
+  assertx(f->numParams() == 2);
+  assertx(!f->hasVariadicCaptureParam());
+  assertx(ar->hasInvName());
   StringData* invName = ar->getInvName();
-  assert(invName);
+  assertx(invName);
   ar->setVarEnv(nullptr);
   int nargs = ar->numArgs();
 
@@ -316,20 +335,21 @@ int shuffleArgsForMagicCall(ActRec* ar) {
 
 TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs) {
   auto& mainCode = mcg->code.main();
-  auto& stubsCode = mcg->code.stubs();
+  auto& frozenCode = mcg->code.frozen();
   vixl::MacroAssembler a { mainCode };
-  vixl::MacroAssembler astubs { stubsCode };
+  vixl::MacroAssembler afrozen { frozenCode };
   TCA start = mainCode.frontier();
-  a.   Ldr   (rAsm.W(), rVmFp[AROFF(m_numArgsAndGenCtorFlags)]);
+  a.   Ldr   (rAsm.W(), rVmFp[AROFF(m_numArgsAndFlags)]);
   for (auto i = 0; i < dvs.size(); ++i) {
     a. Cmp   (rAsm.W(), dvs[i].first);
-    emitBindJcc(mainCode, stubsCode, CC_LE, SrcKey(func, dvs[i].second));
+    emitBindJ(mainCode, frozenCode, CC_LE, SrcKey(func, dvs[i].second, false));
   }
-  emitBindJmp(mainCode, stubsCode, SrcKey(func, func->base()));
+  emitBindJ(mainCode, frozenCode, CC_None, SrcKey(func, func->base(), false));
+  mcg->cgFixups().process(nullptr);
   return start;
 }
 
-SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& stubsCode,
+SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& coldCode,
                         Func* func, bool funcIsMagic, int nPassed,
                         TCA& start, TCA& aStart) {
   vixl::MacroAssembler a { mainCode };
@@ -363,15 +383,14 @@ SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& stubsCode,
     // emit rb
 
     emitStackCheck(cellsToBytes(func->maxStackCells()), func->base());
-    assert(func->numParams() == 2);
+    assertx(func->numParams() == 2);
     // Special __call prologue
     a.   Mov   (argReg(0), rStashedAR);
-    auto fixupAddr = emitCall(a, CppCall(shuffleArgsForMagicCall));
+    auto fixupAddr = emitCall(a, CppCall::direct(shuffleArgsForMagicCall));
     if (RuntimeOption::HHProfServerEnabled) {
-      mcg->fixupMap().recordFixup(
-        fixupAddr,
-        Fixup(skFuncBody.offset() - func->base(), func->numSlotsInFrame())
-      );
+      mcg->recordSyncPoint(fixupAddr,
+                           skFuncBody.offset() - func->base(),
+                           func->numSlotsInFrame());
     }
 
     if (nPassed == 2) {

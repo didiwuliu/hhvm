@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_INTL_CALENDAR_H
 #define incl_HPHP_INTL_CALENDAR_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/calendar.h>
@@ -58,7 +58,7 @@ class IntlCalendar : public IntlError {
     return ret;
   }
 
-  static IntlCalendar* Get(Object obj) {
+  static IntlCalendar* Get(ObjectData* obj) {
     return GetData<IntlCalendar>(obj, s_IntlCalendar);
   }
 

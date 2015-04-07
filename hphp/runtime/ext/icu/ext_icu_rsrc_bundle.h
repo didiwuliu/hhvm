@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_RSRC_BUNDLE_H
 #define incl_HPHP_ICU_RSRC_BUNDLE_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ures.h>
@@ -27,9 +27,10 @@ public:
     return m_rsrc;
   }
 
-  static ResourceBundle* Get(Object obj) {
+  static ResourceBundle* Get(ObjectData* obj) {
     return GetData<ResourceBundle>(obj, s_ResourceBundle);
   }
+
   static Object newInstance(icu::ResourceBundle* bundle) {
     if (!c_ResourceBundle) {
       c_ResourceBundle = Unit::lookupClass(s_ResourceBundle.get());
@@ -65,7 +66,7 @@ public:
     return m_rsrc->get(m_iterIndex, error);
   }
   Variant iterKey() {
-    if (!iterValid()) return uninit_null();
+    if (!iterValid()) return init_null();
     if (m_isTable) {
       UErrorCode error = U_ZERO_ERROR;
       auto key = m_rsrc->get(m_iterIndex, error).getKey();

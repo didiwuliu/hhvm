@@ -91,9 +91,9 @@ struct Allocator {
     return ret;
   }
 
-  template<class... Args>
-  void construct(pointer p, Args&&... args) {
-    new ((void*)p) T(std::forward<Args>(args)...);
+  template<class U, class... Args>
+  void construct(U* p, Args&&... args) {
+    ::new ((void*)p) U(std::forward<Args>(args)...);
   }
 
   void destroy(pointer p) {
@@ -127,6 +127,14 @@ using unique_ptr = typename folly::AllocatorUniquePtr<T,Allocator<T>>::type;
 template<class T, class... Args>
 unique_ptr<T> make_unique(Args&&... args) {
   return folly::allocate_unique<T>(
+    Allocator<T>(),
+    std::forward<Args>(args)...
+  );
+}
+
+template<class T, class... Args>
+std::shared_ptr<T> make_shared(Args&&... args) {
+  return std::allocate_shared<T>(
     Allocator<T>(),
     std::forward<Args>(args)...
   );
@@ -215,12 +223,12 @@ template <class T,
           class W = std::equal_to<T>>
 struct hash_map : std::unordered_map<
   T, U, V, W,
-  Allocator<std::pair<T,U>>
+  Allocator<std::pair<const T,U>>
 > {
   hash_map()
     : std::unordered_map<
         T, U, V, W,
-        Allocator<std::pair<T,U>>
+        Allocator<std::pair<const T,U>>
       >(0)
   {}
 };
@@ -231,12 +239,12 @@ template <class T,
           class W = std::equal_to<T>>
 struct hash_multimap : std::unordered_multimap<
   T, U, V, W,
-  Allocator<std::pair<T,U>>
+  Allocator<std::pair<const T,U>>
 > {
   hash_multimap()
     : std::unordered_multimap<
         T, U, V, W,
-        Allocator<std::pair<T,U>>
+        Allocator<std::pair<const T,U>>
       >(0)
   {}
 };

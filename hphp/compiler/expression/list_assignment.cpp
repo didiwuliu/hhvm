@@ -218,7 +218,6 @@ void ListAssignment::analyzeProgram(AnalysisResultPtr ar) {
   if (m_variables) m_variables->analyzeProgram(ar);
   if (m_array) m_array->analyzeProgram(ar);
   FunctionScopePtr func = getFunctionScope();
-  if (func) func->disableInline();
   if (ar->getPhase() == AnalysisResult::AnalyzeFinal) {
     if (m_variables) {
       for (int i = 0; i < m_variables->getCount(); i++) {
@@ -262,25 +261,6 @@ void ListAssignment::setNthKid(int n, ConstructPtr cp) {
       assert(false);
       break;
   }
-}
-
-TypePtr ListAssignment::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                   bool coerce) {
-  if (m_variables) {
-    for (int i = m_variables->getCount(); i--; ) {
-      ExpressionPtr exp = (*m_variables)[i];
-      if (exp) {
-        if (exp->is(Expression::KindOfListAssignment)) {
-          exp->inferAndCheck(ar, Type::Any, false);
-        } else {
-          inferAssignmentTypes(ar, Type::Variant, true, exp);
-        }
-      }
-    }
-  }
-
-  if (!m_array) return TypePtr();
-  return m_array->inferAndCheck(ar, Type::Variant, false);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

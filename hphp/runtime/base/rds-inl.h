@@ -16,7 +16,7 @@
 #ifndef incl_HPHP_RUNTIME_BASE_RDS_INL_H_
 #define incl_HPHP_RUNTIME_BASE_RDS_INL_H_
 
-namespace HPHP { namespace RDS {
+namespace HPHP { namespace rds {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -25,15 +25,10 @@ namespace detail {
 Handle alloc(Mode mode, size_t numBytes, size_t align);
 Handle allocUnlocked(Mode mode, size_t numBytes, size_t align);
 Handle bindImpl(Symbol key, Mode mode, size_t sizeBytes, size_t align);
+Handle attachImpl(Symbol key);
 void bindOnLinkImpl(std::atomic<Handle>& handle, Mode mode,
   size_t sizeBytes, size_t align);
 
-}
-
-//////////////////////////////////////////////////////////////////////
-
-inline Header* header() {
-  return static_cast<Header*>(tl_base);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -66,10 +61,16 @@ Handle Link<T>::handle() const {
 }
 
 template<class T>
+bool Link<T>::isPersistent() const {
+  return isPersistentHandle(handle());
+}
+
+template<class T>
 template<size_t Align>
 void Link<T>::bind(Mode mode) {
   if (LIKELY(bound())) return;
   detail::bindOnLinkImpl(m_handle, mode, sizeof(T), Align);
+  recordRds(m_handle, sizeof(T), "Unknown", __PRETTY_FUNCTION__);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -79,9 +80,27 @@ Link<T> bind(Symbol key, Mode mode) {
   return Link<T>(detail::bindImpl(key, mode, sizeof(T), Align));
 }
 
+template<class T>
+Link<T> attach(Symbol key) {
+  return Link<T>(detail::attachImpl(key));
+}
+
 template<class T, size_t Align>
 Link<T> alloc(Mode mode) {
   return Link<T>(detail::allocUnlocked(mode, sizeof(T), Align));
+}
+
+//////////////////////////////////////////////////////////////////////
+
+template<class T>
+T& handleToRef(Handle h) {
+  return handleToRef<T>(tl_base, h);
+}
+
+template<class T>
+T& handleToRef(void* base, Handle h) {
+  void* vp = static_cast<char*>(base) + h;
+  return *static_cast<T*>(vp);
 }
 
 //////////////////////////////////////////////////////////////////////

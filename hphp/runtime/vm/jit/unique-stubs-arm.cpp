@@ -20,9 +20,10 @@
 #include "hphp/runtime/vm/jit/code-gen-helpers-arm.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/service-requests-inline.h"
 #include "hphp/vixl/a64/macro-assembler-a64.h"
 
-namespace HPHP { namespace JIT { namespace ARM {
+namespace HPHP { namespace jit { namespace arm {
 
 namespace {
 
@@ -33,12 +34,7 @@ void emitCallToExit(UniqueStubs& us) {
 
   a.   Nop   ();
   us.callToExit = a.frontier();
-  emitServiceReq(
-    mcg->code.main(),
-    SRFlags::Align | SRFlags::JmpInsteadOfRet,
-    REQ_EXIT
-  );
-
+  a.   Br    (rLinkReg);
   us.add("callToExit", us.callToExit);
 }
 
@@ -62,47 +58,33 @@ void emitReturnHelpers(UniqueStubs& us) {
 void emitResumeHelpers(UniqueStubs& us) {
   MacroAssembler a { mcg->code.main() };
 
-  auto const fpOff = offsetof(ExecutionContext, m_fp);
-  auto const spOff = offsetof(ExecutionContext, m_stack) +
-                       Stack::topOfStackOffset();
-
   us.resumeHelperRet = a.frontier();
   a.   Str   (vixl::x30, rStashedAR[AROFF(m_savedRip)]);
   us.resumeHelper = a.frontier();
-  a.   Ldr   (rVmFp, rGContextReg[fpOff]);
-  a.   Ldr   (rVmSp, rGContextReg[spOff]);
+  a.   Ldr   (rVmFp, rVmTl[rds::kVmfpOff]);
+  a.   Ldr   (rVmSp, rVmTl[rds::kVmspOff]);
 
-  emitServiceReq(mcg->code.main(), REQ_RESUME);
+  not_implemented();
 
   us.add("resumeHelper", us.resumeHelper);
   us.add("resumeHelperRet", us.resumeHelperRet);
 }
 
 void emitStackOverflowHelper(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.stubs() };
+  MacroAssembler a { mcg->code.cold() };
 
   us.stackOverflowHelper = a.frontier();
   a.  Ldr  (rAsm, rVmFp[AROFF(m_func)]);
   a.  Ldr  (rAsm2.W(), rStashedAR[AROFF(m_soff)]);
-  a.  Ldr  (rAsm, rAsm[Func::sharedOffset()]);
-  a.  Ldr  (rAsm.W(), rAsm[Func::sharedBaseOffset()]);
+  a.  Ldr  (rAsm, rAsm[Func::sharedOff()]);
+  a.  Ldr  (rAsm.W(), rAsm[Func::sharedBaseOff()]);
   // The VM-reg-save helper will read the current BC offset out of argReg(0).
   a.  Add  (argReg(0).W(), rAsm.W(), rAsm2.W());
 
-  emitEagerVMRegSave(a, RegSaveFlags::SaveFP | RegSaveFlags::SavePC);
-  emitServiceReq(mcg->code.stubs(), REQ_STACK_OVERFLOW);
+  emitEagerVMRegSave(a, rVmTl, RegSaveFlags::SaveFP | RegSaveFlags::SavePC);
+  not_implemented();
 
   us.add("stackOverflowHelper", us.stackOverflowHelper);
-}
-
-
-void emitDefClsHelper(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
-
-  us.defClsHelper = a.frontier();
-  a.   Brk   (0);
-
-  us.add("defClsHelper", us.defClsHelper);
 }
 
 void emitFreeLocalsHelpers(UniqueStubs& us) {
@@ -126,9 +108,11 @@ void emitFuncPrologueRedispatch(UniqueStubs& us) {
   // so there are no live registers.
 
   a.  Ldr  (x0, rStashedAR[AROFF(m_func)]);
-  a.  Ldr  (w1, rStashedAR[AROFF(m_numArgsAndGenCtorFlags)]);
-  a.  And  (w1, w1, 0x7fffffff);
-  a.  Ldr  (w2, x0[Func::numParamsOff()]);
+  a.  Ldr  (w1, rStashedAR[AROFF(m_numArgsAndFlags)]);
+  a.  And  (w1, w1, 0x1fffffff);
+  a.  Ldr  (w2, x0[Func::paramCountsOff()]);
+  // See Func::finishedEmittingParams and Func::numParams for rationale
+  a.  Lsr  (w2, w2, 0x1);
 
   // If we passed more args than declared, jump to the numParamsCheck.
   a.  Cmp  (w2, w1);
@@ -178,23 +162,22 @@ void emitFCallHelperThunk(UniqueStubs& us) {
   a.   Mov   (argReg(1), rVmSp);
   a.   Cmp   (rVmFp, rStashedAR);
   a.   B     (&popAndXchg, vixl::ne);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   a.   Br    (rReturnReg);
 
   a.   bind  (&popAndXchg);
   emitXorSwap(a, rStashedAR, rVmFp);
   // Put return address into ActRec.
   a.   Str   (rLinkReg, rVmFp[AROFF(m_savedRip)]);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   // Put return address back in the link register.
   a.   Ldr   (rLinkReg, rVmFp[AROFF(m_savedRip)]);
   emitXorSwap(a, rStashedAR, rVmFp);
   a.   Cmp   (rReturnReg, 0);
   a.   B     (&jmpRet, vixl::gt);
   a.   Neg   (rReturnReg, rReturnReg);
-  a.   Ldr   (rVmFp, rGContextReg[offsetof(ExecutionContext, m_fp)]);
-  a.   Ldr   (rVmSp, rGContextReg[offsetof(ExecutionContext, m_stack) +
-                                  Stack::topOfStackOffset()]);
+  a.   Ldr   (rVmFp, rVmTl[rds::kVmfpOff]);
+  a.   Ldr   (rVmSp, rVmTl[rds::kVmspOff]);
 
   a.   bind  (&jmpRet);
 
@@ -220,7 +203,7 @@ void emitFuncBodyHelperThunk(UniqueStubs& us) {
 }
 
 void emitFunctionEnterHelper(UniqueStubs& us) {
-  bool (*helper)(const ActRec*, int) = &EventHook::onFunctionEnter;
+  bool (*helper)(const ActRec*, int) = &EventHook::onFunctionCall;
   MacroAssembler a { mcg->code.main() };
 
   us.functionEnterHelper = a.frontier();
@@ -232,9 +215,9 @@ void emitFunctionEnterHelper(UniqueStubs& us) {
   a.   Push    (rLinkReg, rVmFp);
   a.   Mov     (rVmFp, vixl::sp);
   // rAsm2 gets the savedRbp, rAsm gets the savedRip.
-  a.   Ldp     (rAsm2, rAsm, ar[AROFF(m_savedRbp)]);
-  static_assert(AROFF(m_savedRbp) + 8 == AROFF(m_savedRip),
-                "m_savedRbp must precede m_savedRip");
+  a.   Ldp     (rAsm2, rAsm, ar[AROFF(m_sfp)]);
+  static_assert(AROFF(m_sfp) + 8 == AROFF(m_savedRip),
+                "m_sfp must precede m_savedRip");
   a.   Push    (rAsm, rAsm2);
   a.   Mov     (argReg(1), EventHook::NormalFunc);
   a.   Mov     (rHostCallReg, reinterpret_cast<intptr_t>(helper));
@@ -254,11 +237,29 @@ void emitFunctionEnterHelper(UniqueStubs& us) {
   auto rIgnored = rAsm2;
   a.   Pop     (rVmFp, rAsm);
   a.   Pop     (rIgnored, rLinkReg);
-  a.   Ldr     (rVmSp, rGContextReg[offsetof(ExecutionContext, m_stack) +
-                                    Stack::topOfStackOffset()]);
+  a.   Ldr     (rVmSp, rVmTl[rds::kVmspOff]);
   a.   Br      (rAsm);
 
   us.add("functionEnterHelper", us.functionEnterHelper);
+}
+
+void emitBindCallStubs(UniqueStubs& uniqueStubs) {
+  for (int i = 0; i < 2; i++) {
+    auto& cb = mcg->code.cold();
+    if (!i) {
+      uniqueStubs.bindCallStub = cb.frontier();
+    } else {
+      uniqueStubs.immutableBindCallStub = cb.frontier();
+    }
+    Vauto vasm(cb);
+    auto& vf = vasm.main();
+    // Pop the return address into the actrec in rStashedAR.
+    vf << store{PhysReg{rLinkReg}, PhysReg{rStashedAR}[AROFF(m_savedRip)]};
+    auto const argv = packServiceReqArgs((int64_t)i);
+    not_implemented();
+  }
+  uniqueStubs.add("bindCallStub", uniqueStubs.bindCallStub);
+  uniqueStubs.add("immutableBindCallStub", uniqueStubs.immutableBindCallStub);
 }
 
 } // anonymous namespace
@@ -270,13 +271,13 @@ UniqueStubs emitUniqueStubs() {
     emitReturnHelpers,
     emitResumeHelpers,
     emitStackOverflowHelper,
-    emitDefClsHelper,
     emitFreeLocalsHelpers,
     emitFuncPrologueRedispatch,
     emitFCallArrayHelper,
     emitFCallHelperThunk,
     emitFuncBodyHelperThunk,
     emitFunctionEnterHelper,
+    emitBindCallStubs,
   };
   for (auto& f : functions) f(us);
   return us;

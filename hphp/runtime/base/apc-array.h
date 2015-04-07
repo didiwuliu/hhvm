@@ -36,12 +36,11 @@ class APCLocalArray;
  */
 struct APCArray {
   // Entry point to create an APCArray of any kind
-  static APCHandle* MakeShared(ArrayData* data,
-                               bool inner,
-                               bool unserializeObj);
-  static APCHandle* MakeShared();
+  static APCHandle::Pair MakeSharedArray(ArrayData* data, bool inner,
+                                         bool unserializeObj);
+  static APCHandle::Pair MakeSharedEmptyArray();
 
-  static Variant MakeArray(APCHandle* handle);
+  static Variant MakeArray(const APCHandle* handle);
 
   static void Delete(APCHandle* handle);
 
@@ -50,12 +49,16 @@ struct APCArray {
     return reinterpret_cast<APCArray*>(handle);
   }
 
+  static const APCArray* fromHandle(const APCHandle* handle) {
+    assert(offsetof(APCArray, m_handle) == 0);
+    return reinterpret_cast<const APCArray*>(handle);
+  }
+
   APCHandle* getHandle() {
     return &m_handle;
   }
-
-  bool shouldCache() const {
-    return m_handle.m_shouldCache;
+  const APCHandle* getHandle() const {
+    return &m_handle;
   }
 
   //
@@ -105,8 +108,7 @@ private:
   explicit APCArray(size_t size) : m_handle(KindOfArray), m_size(size) {
     m_handle.setPacked();
   }
-  explicit APCArray(unsigned int cap)
-      : m_handle(KindOfArray) {
+  explicit APCArray(unsigned int cap) : m_handle(KindOfArray) {
     m.m_capacity_mask = cap - 1;
     m.m_num = 0;
   }
@@ -128,23 +130,20 @@ private:
   //
   // Create API
   //
-  static APCHandle* MakeShared(ArrayData* data,
-                               bool unserializeObj);
-  static APCHandle* MakePackedShared(ArrayData* data,
-                                     bool unserializeObj);
+  static APCHandle::Pair MakeHash(ArrayData* data, bool unserializeObj);
+  static APCHandle::Pair MakePacked(ArrayData* data, bool unserializeObj);
 
-  void mustCache() { m_handle.m_shouldCache = true; }
   void setPacked() { m_handle.setPacked(); }
 
   //
   // Array internal API
   //
-  void add(APCHandle *key, APCHandle *val);
+  void add(APCHandle* key, APCHandle* val);
   ssize_t indexOf(const StringData* key) const;
   ssize_t indexOf(int64_t key) const;
 
   /* index of the beginning of each hash chain */
-  int *hash() const { return (int*)(this + 1); }
+  int* hash() const { return (int*)(this + 1); }
   /* buckets, stored in index order */
   Bucket* buckets() const { return (Bucket*)(hash() + m.m_capacity_mask + 1); }
   /* start of the data for packed array */
@@ -152,6 +151,7 @@ private:
 
 private:
   friend struct APCHandle;
+  friend size_t getMemSize(const APCArray*);
 
   APCHandle m_handle;
   union {

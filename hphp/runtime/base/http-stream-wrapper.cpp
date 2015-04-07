@@ -15,10 +15,14 @@
 */
 
 #include "hphp/runtime/base/http-stream-wrapper.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/url-file.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
+#include "hphp/runtime/ext/url/ext_url.h"
+#include "hphp/runtime/base/ini-setting.h"
 #include <memory>
 
 namespace HPHP {
@@ -29,14 +33,19 @@ const StaticString
   s_method("method"),
   s_http("http"),
   s_header("header"),
+  s_ignore_errors("ignore_errors"),
   s_max_redirects("max_redirects"),
   s_timeout("timeout"),
+  s_proxy("proxy"),
   s_content("content"),
   s_user_agent("user_agent"),
   s_User_Agent("User-Agent");
 
-File* HttpStreamWrapper::open(const String& filename, const String& mode,
-                              int options, const Variant& context) {
+SmartPtr<File>
+HttpStreamWrapper::open(const String& filename,
+                        const String& mode,
+                        int options,
+                        const SmartPtr<StreamContext>& context) {
   if (RuntimeOption::ServerHttpSafeMode) {
     return nullptr;
   }
@@ -46,21 +55,24 @@ File* HttpStreamWrapper::open(const String& filename, const String& mode,
     return nullptr;
   }
 
-  std::unique_ptr<UrlFile> file;
-  StreamContext *ctx = !context.isResource() ? nullptr :
-                        context.toResource().getTyped<StreamContext>();
-  if (!ctx || ctx->getOptions().isNull() ||
-      ctx->getOptions()[s_http].isNull()) {
-    file = std::unique_ptr<UrlFile>(NEWOBJ(UrlFile)());
-  } else {
-    Array opts = ctx->getOptions()[s_http].toArray();
-    String method = s_GET;
+  Array headers;
+  String method = s_GET;
+  String post_data = null_string;
+  String proxy_host;
+  String proxy_user;
+  String proxy_pass;
+  int proxy_port = -1;
+  int max_redirs = 20;
+  int timeout = -1;
+  bool ignore_errors = false;
+
+  if (context && !context->getOptions().isNull() &&
+      !context->getOptions()[s_http].isNull()) {
+    Array opts = context->getOptions()[s_http].toArray();
     if (opts.exists(s_method)) {
       method = opts[s_method].toString();
     }
-    Array headers;
     if (opts.exists(s_header)) {
-
       Array lines;
       if (opts[s_header].isString()) {
         lines = StringUtil::Explode(
@@ -71,32 +83,57 @@ File* HttpStreamWrapper::open(const String& filename, const String& mode,
 
       for (ArrayIter it(lines); it; ++it) {
         Array parts = StringUtil::Explode(
-          it.second().toString(), ": ").toArray();
+          it.second().toString(), ":", 2).toArray();
         headers.set(parts.rvalAt(0), parts.rvalAt(1));
       }
     }
     if (opts.exists(s_user_agent) && !headers.exists(s_User_Agent)) {
       headers.set(s_User_Agent, opts[s_user_agent]);
     }
-    int max_redirs = 20;
     if (opts.exists(s_max_redirects)) {
       max_redirs = opts[s_max_redirects].toInt64();
     }
-    int timeout = -1;
     if (opts.exists(s_timeout)) {
       timeout = opts[s_timeout].toInt64();
     }
-    file = std::unique_ptr<UrlFile>(NEWOBJ(UrlFile)(method.data(), headers,
-                                                    opts[s_content].toString(),
-                                                    max_redirs, timeout));
+    if (opts.exists(s_ignore_errors)) {
+      ignore_errors = opts[s_ignore_errors].toBoolean();
+    }
+    if (opts.exists(s_proxy)) {
+      Variant host = f_parse_url(opts[s_proxy].toString(), k_PHP_URL_HOST);
+      Variant port = f_parse_url(opts[s_proxy].toString(), k_PHP_URL_PORT);
+      if (!same(host, false) && !same(port, false)) {
+        proxy_host = host.toString();
+        proxy_port = port.toInt64();
+        Variant user = f_parse_url(opts[s_proxy].toString(), k_PHP_URL_USER);
+        Variant pass = f_parse_url(opts[s_proxy].toString(), k_PHP_URL_PASS);
+        if (!same(user, false) && !same(pass, false)) {
+          proxy_user = user.toString();
+          proxy_pass = pass.toString();
+        }
+      }
+    }
+    post_data = opts[s_content].toString();
   }
+
+  if (!headers.exists(s_User_Agent)) {
+    auto default_user_agent = ThreadInfo::s_threadInfo.getNoCheck()
+      ->m_reqInjectionData.getUserAgent();
+    if (!default_user_agent.empty()) {
+      headers.set(s_User_Agent, default_user_agent);
+    }
+  }
+  auto file = makeSmartPtr<UrlFile>(method.data(), headers,
+                                    post_data, max_redirs,
+                                    timeout, ignore_errors);
+  file->setProxy(proxy_host, proxy_port, proxy_user, proxy_pass);
   bool ret = file->open(filename, mode);
   if (!ret) {
     raise_warning("Failed to open %s (%s)", filename.data(),
                   file->getLastError().c_str());
     return nullptr;
   }
-  return file.release();
+  return file;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -15,17 +15,24 @@
 */
 
 #include "hphp/runtime/server/files-match.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/server/virtual-host.h"
 #include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/base/config.h"
 #include "hphp/util/text-util.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-FilesMatch::FilesMatch(Hdf vh) {
-  m_pattern = format_pattern(vh["pattern"].get(""), true);
-  vh["headers"].get(m_headers);
+FilesMatch::FilesMatch(const IniSetting::Map& ini, const Hdf& vh) {
+  if (vh.exists()) {
+    m_pattern = format_pattern(vh["pattern"].configGetString(), true);
+    vh["headers"].configGet(m_headers);
+  } else {
+    m_pattern = format_pattern(ini["pattern"].data(), true);
+    for (auto& val : ini["headers"].items()) {
+      m_headers.push_back(val.second.data());
+    }
+  }
 }
 
 bool FilesMatch::match(const std::string &filename) const {

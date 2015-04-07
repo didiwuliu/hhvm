@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ENUM_CACHE_H_
 #define incl_HPHP_ENUM_CACHE_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/vm/class.h"
 #include <tbb/concurrent_hash_map.h>
 
@@ -62,6 +62,8 @@ public:
   // If the recurse flag is 'true' array values are loaded up the hierarchy
   // chain (if any).
   static const EnumValues* getValues(const Class* klass, bool recurse);
+  // Like above, but for first-class enums
+  static const EnumValues* getValuesBuiltin(const Class* klass);
   // delete the EnumValues element in the cache for the given class.
   // If there is no entry this function is a no-op.
   static void deleteValues(const Class* klass);
@@ -99,4 +101,3 @@ private:
 }
 
 #endif
-

@@ -11,20 +11,27 @@
 
 type client_mode =
 | MODE_LIST_FILES
-| MODE_SKIP
-| MODE_SHOW_TYPES of string
+| MODE_LIST_MODES
 | MODE_TYPE_AT_POS of string
 | MODE_AUTO_COMPLETE
 | MODE_STATUS
 | MODE_UNSPECIFIED
 | MODE_VERSION
-| MODE_SAVE_STATE of string
 | MODE_SHOW of string
 | MODE_COLORING of string
+| MODE_COVERAGE of string
 | MODE_FIND_REFS of string
 | MODE_IDENTIFY_FUNCTION of string
 | MODE_OUTLINE
+| MODE_METHOD_JUMP_CHILDREN of string
+| MODE_METHOD_JUMP_ANCESTORS of string
+| MODE_REFACTOR
 | MODE_FIND_CLASS_REFS of string
+| MODE_ARGUMENT_INFO of string
+(* TODO figure out why we can't reference FuzzySearchService from here *)
+| MODE_SEARCH of string * string
+| MODE_LINT of string list
+| MODE_LINT_ALL of int
 
 type client_check_env = {
   mode: client_mode;
@@ -35,4 +42,5 @@ type client_check_env = {
   retries: int;
   timeout: float option;
   autostart: bool;
+  no_load: bool;
 }

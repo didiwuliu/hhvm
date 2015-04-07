@@ -15,8 +15,10 @@
 */
 
 #include "hphp/compiler/expression/expression_list.h"
+
 #include <set>
 #include <vector>
+
 #include "hphp/compiler/expression/scalar_expression.h"
 #include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/expression/unary_op_expression.h"
@@ -34,13 +36,41 @@ using namespace HPHP;
 
 ExpressionList::ExpressionList(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                                ListKind kind)
-  : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ExpressionList)),
-    m_arrayElements(false), m_collectionType(0), m_kind(kind) {
+  : Expression(EXPRESSION_CONSTRUCTOR_PARAMETER_VALUES(ExpressionList))
+  , m_elems_kind(ElemsKind::None)
+  , m_argUnpack(false)
+  , m_kind(kind)
+{}
+
+/*
+ * We can end up with chains of canonPtrs keeping the
+ * elements of an ExpressionList alive, with the result
+ * that when they are finally destroyed, they are destroyed
+ * one by one, recursively.
+ * This proactively clears them.
+ */
+static void clearCanonPtrs(ExpressionPtr e) {
+  e->setCanonPtr(ExpressionPtr{});
+  for (int i = e->getKidCount(); i--; ) {
+    ExpressionPtr kid = e->getNthExpr(i);
+    if (kid && !kid->is(Expression::KindOfExpressionList)) {
+      clearCanonPtrs(kid);
+    }
+  }
+}
+
+ExpressionList::~ExpressionList() {
+  for (auto e : m_exps) {
+    if (e) {
+      clearCanonPtrs(e);
+    }
+  }
 }
 
 ExpressionPtr ExpressionList::clone() {
   ExpressionListPtr exp(new ExpressionList(*this));
   Expression::deepCopy(exp);
+  assert(exp->m_argUnpack == this->m_argUnpack);
   exp->m_exps.clear();
   for (unsigned int i = 0; i < m_exps.size(); i++) {
     exp->m_exps.push_back(Clone(m_exps[i]));
@@ -57,7 +87,7 @@ void ExpressionList::toLower() {
 
 void ExpressionList::setContext(Context context) {
   Expression::setContext(context);
-  if (m_kind == ListKindParam && context & UnsetContext) {
+  if (m_kind == ListKindParam && (context & UnsetContext)) {
     for (unsigned int i = m_exps.size(); i--; ) {
       if (m_exps[i]) {
         m_exps[i]->setContext(UnsetContext);
@@ -74,9 +104,9 @@ void ExpressionList::setContext(Context context) {
 void ExpressionList::addElement(ExpressionPtr exp) {
   ArrayPairExpressionPtr ap = dynamic_pointer_cast<ArrayPairExpression>(exp);
   if (ap) {
-    m_arrayElements = true;
+    if (m_elems_kind == ElemsKind::None) m_elems_kind = ElemsKind::ArrayPairs;
   } else {
-    assert(!m_arrayElements);
+    assert(m_elems_kind == ElemsKind::None);
   }
   m_exps.push_back(exp);
 }
@@ -106,16 +136,16 @@ bool ExpressionList::isRefable(bool checkError /* = false */) const {
 }
 
 bool ExpressionList::isScalar() const {
-  if (m_arrayElements) {
+  if (m_elems_kind != ElemsKind::None) {
     return isScalarArrayPairs();
   }
-
   if (m_kind == ListKindParam) {
     for (unsigned int i = m_exps.size(); i--; ) {
       if (m_exps[i] && !m_exps[i]->isScalar()) return false;
     }
     return true;
-  } else if (!hasEffect()) {
+  }
+  if (!hasEffect()) {
     ExpressionPtr v(listValue());
     return v ? v->isScalar() : false;
   }
@@ -139,7 +169,9 @@ bool ExpressionList::containsDynamicConstant(AnalysisResultPtr ar) const {
 }
 
 bool ExpressionList::isScalarArrayPairs() const {
-  if (!m_arrayElements || m_collectionType) return false;
+  if (m_elems_kind != ElemsKind::ArrayPairs) {
+    return false;
+  }
   for (unsigned int i = 0; i < m_exps.size(); i++) {
     ArrayPairExpressionPtr exp =
       dynamic_pointer_cast<ArrayPairExpression>(m_exps[i]);
@@ -193,7 +225,7 @@ ExpressionList::flattenLiteralStrings(vector<ExpressionPtr> &literals) const {
 }
 
 bool ExpressionList::getScalarValue(Variant &value) {
-  if (m_arrayElements) {
+  if (m_elems_kind != ElemsKind::None) {
     if (isScalarArrayPairs()) {
       ArrayInit init(m_exps.size(), ArrayInit::Mixed{});
       for (unsigned int i = 0; i < m_exps.size(); i++) {
@@ -205,14 +237,14 @@ bool ExpressionList::getScalarValue(Variant &value) {
           Variant v;
           bool ret = val->getScalarValue(v);
           if (!ret) assert(false);
-          init.set(v);
+          init.append(v);
         } else {
           Variant n;
           Variant v;
           bool ret1 = name->getScalarValue(n);
           bool ret2 = val->getScalarValue(v);
           if (!(ret1 && ret2)) return false;
-          init.set(n, v);
+          init.setKeyUnconverted(n, v);
         }
       }
       value = Array(init.create());
@@ -252,33 +284,24 @@ void ExpressionList::stripConcat() {
   }
 }
 
-void ExpressionList::markParam(int p, bool noRefWrapper) {
+void ExpressionList::markParam(int p) {
   ExpressionPtr param = (*this)[p];
   if (param->hasContext(Expression::InvokeArgument)) {
-    if (noRefWrapper) {
-      param->setContext(Expression::NoRefWrapper);
-    } else {
-      param->clearContext(Expression::NoRefWrapper);
-    }
   } else if (!param->hasContext(Expression::RefParameter)) {
     param->setContext(Expression::InvokeArgument);
     param->setContext(Expression::RefValue);
-    if (noRefWrapper) {
-      param->setContext(Expression::NoRefWrapper);
-    }
   }
   param->setArgNum(p);
 }
 
-void ExpressionList::markParams(bool noRefWrapper) {
+void ExpressionList::markParams() {
   for (int i = 0; i < getCount(); i++) {
-    markParam(i, noRefWrapper);
+    markParam(i);
   }
 }
 
-void ExpressionList::setCollectionType(Collection::Type cType) {
-  m_arrayElements = true;
-  m_collectionType = cType;
+void ExpressionList::setCollectionElems() {
+  m_elems_kind = ElemsKind::Collection;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -388,7 +411,8 @@ void ExpressionList::optimize(AnalysisResultConstPtr ar) {
     }
   } else {
     bool isUnset = hasContext(UnsetContext) &&
-      ar->getPhase() >= AnalysisResult::PostOptimize;
+      // This used to be gated on ar->getPhase() >= PostOptimize
+      false;
     int isGlobal = -1;
     while (i--) {
       ExpressionPtr &e = m_exps[i];
@@ -428,44 +452,10 @@ ExpressionPtr ExpressionList::preOptimize(AnalysisResultConstPtr ar) {
   return ExpressionPtr();
 }
 
-ExpressionPtr ExpressionList::postOptimize(AnalysisResultConstPtr ar) {
-  optimize(ar);
-  return ExpressionPtr();
-}
-
-TypePtr ExpressionList::inferTypes(AnalysisResultPtr ar, TypePtr type,
-                                   bool coerce) {
-  size_t size = m_exps.size();
-  bool commaList = size && (m_kind != ListKindParam);
-  size_t ix = m_kind == ListKindLeft ? 0 : size - 1;
-  TypePtr tmp = commaList ? Type::Some : type;
-  TypePtr ret = type;
-  for (size_t i = 0; i < size; i++) {
-    TypePtr t = i != ix ? tmp : type;
-    bool c = coerce && (!commaList || i == ix);
-    if (ExpressionPtr e = m_exps[i]) {
-      e->inferAndCheck(ar, t, c);
-      if (commaList && i == ix) {
-        e->setExpectedType(TypePtr());
-        ret = e->getActualType();
-        if (e->getImplementedType()) {
-          m_implementedType = e->getImplementedType();
-        }
-        if (!ret) ret = Type::Variant;
-      }
-    }
-  }
-  return ret;
-}
-
 bool ExpressionList::canonCompare(ExpressionPtr e) const {
   if (!Expression::canonCompare(e)) return false;
-  ExpressionListPtr l =
-    static_pointer_cast<ExpressionList>(e);
-
-  return m_arrayElements == l->m_arrayElements &&
-         m_collectionType == l->m_collectionType &&
-         m_kind == l->m_kind;
+  ExpressionListPtr l = static_pointer_cast<ExpressionList>(e);
+  return m_elems_kind == l->m_elems_kind && m_kind == l->m_kind;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -498,8 +488,8 @@ void ExpressionList::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
 }
 
 unsigned int ExpressionList::checkLitstrKeys() const {
-  assert(m_arrayElements && !m_collectionType);
-  std::set<string> keys;
+  assert(m_elems_kind == ElemsKind::ArrayPairs);
+  std::unordered_set<string> keys;
   for (unsigned int i = 0; i < m_exps.size(); i++) {
     ArrayPairExpressionPtr ap =
       dynamic_pointer_cast<ArrayPairExpression>(m_exps[i]);

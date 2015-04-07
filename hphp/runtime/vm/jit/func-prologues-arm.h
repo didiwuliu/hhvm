@@ -20,8 +20,8 @@
 
 #include "hphp/vixl/a64/instructions-a64.h"
 
+#include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/vm/srckey.h"
-#include "hphp/runtime/vm/jit/arch.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/types.h"
@@ -30,21 +30,21 @@ namespace HPHP {
 
 struct Func;
 
-namespace JIT { namespace ARM {
+namespace jit { namespace arm {
 
-inline const Func** funcPrologueToGuardImmPtr(JIT::TCA prologue) {
-  assert(arch() == Arch::ARM);
+inline const Func** funcPrologueToGuardImmPtr(jit::TCA prologue) {
+  assertx(arch() == Arch::ARM);
   return reinterpret_cast<const Func**>(prologue) - 1;
 }
 
-inline bool funcPrologueHasGuard(JIT::TCA prologue, const Func* func) {
-  assert(arch() == Arch::ARM);
+inline bool funcPrologueHasGuard(jit::TCA prologue, const Func* func) {
+  assertx(arch() == Arch::ARM);
   return *funcPrologueToGuardImmPtr(prologue) == func;
 }
 
 inline TCA funcPrologueToGuard(TCA prologue, const Func* func) {
-  assert(arch() == Arch::ARM);
-  if (!prologue || prologue == tx->uniqueStubs.fcallHelperThunk) {
+  assertx(arch() == Arch::ARM);
+  if (!prologue || prologue == mcg->tx().uniqueStubs.fcallHelperThunk) {
     return prologue;
   }
 
@@ -65,17 +65,17 @@ inline TCA funcPrologueToGuard(TCA prologue, const Func* func) {
   }
 }
 
-inline void funcPrologueSmashGuard(JIT::TCA prologue, const Func* func) {
+inline void funcPrologueSmashGuard(jit::TCA prologue, const Func* func) {
   *funcPrologueToGuardImmPtr(prologue) = nullptr;
 }
 
 //////////////////////////////////////////////////////////////////////
 
-JIT::TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs);
+jit::TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs);
 
-SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& stubsCode,
+SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& coldCode,
                         Func* func, bool funcIsMagic, int nPassed,
-                        JIT::TCA& start, JIT::TCA& aStart);
+                        jit::TCA& start, jit::TCA& aStart);
 
 }}}
 

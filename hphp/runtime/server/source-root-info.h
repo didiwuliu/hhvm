@@ -17,7 +17,8 @@
 #ifndef incl_HPHP_SOURCE_ROOT_INFO_H_
 #define incl_HPHP_SOURCE_ROOT_INFO_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/debugger/debugger_base.h"
 
 namespace HPHP {
@@ -34,7 +35,11 @@ public:
 
   ~SourceRootInfo();
 
-  void setServerVariables(Array& server) const;
+  // Set SERVER variables in array, and return the modified version.
+  // You'll likely want to ensure the array coming in is a temporary
+  // (so it can be modified in place).
+  Array setServerVariables(Array server) const;
+
   std::string path() const;
 
   bool sandboxOn() const {
@@ -55,11 +60,19 @@ public:
   static const std::string &GetCurrentSourceRoot() {
     return s_path.isNull() ? RuntimeOption::SourceRoot : *s_path;
   }
-  static const std::string &GetCurrentPhpRoot() {
-    return s_phproot.isNull() ? initPhpRoot() : *s_phproot;
+
+  static String RelativeToPhpRoot(const String& path) {
+    String ret = GetCurrentSourceRoot();
+    ret += path;
+    return ret;
   }
 
   Eval::DSandboxInfo getSandboxInfo() const;
+
+private:
+  static const std::string& GetCurrentPhpRoot() {
+    return s_phproot.isNull() ? initPhpRoot() : *s_phproot;
+  }
 
 private:
   String m_user;

@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_DATE_FMT_H
 #define incl_HPHP_ICU_DATE_FMT_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/udat.h>
@@ -59,7 +59,7 @@ class IntlDateFormatter : public IntlError {
     }
     return ObjectData::newInstance(c_IntlDateFormatter);
   }
-  static IntlDateFormatter* Get(Object obj) {
+  static IntlDateFormatter* Get(ObjectData* obj) {
     return GetData<IntlDateFormatter>(obj, s_IntlDateFormatter);
   }
 

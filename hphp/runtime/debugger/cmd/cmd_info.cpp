@@ -17,12 +17,13 @@
 #include "hphp/runtime/debugger/cmd/cmd_info.h"
 #include <vector>
 
-#include "folly/dynamic.h"
-#include "folly/json.h"
+#include <folly/dynamic.h>
+#include <folly/json.h>
 
 #include "hphp/runtime/debugger/cmd/cmd_variable.h"
 #include "hphp/runtime/ext/reflection/ext_reflection.h"
-#include "hphp/runtime/ext/ext_string.h"
+#include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/util/logger.h"
 
@@ -58,7 +59,9 @@ const StaticString
   s_parent("parent"),
   s_interfaces("interfaces"),
   s_interface("interface"),
-  s_type_profiling("type_profiling");
+  s_type_profiling("type_profiling"),
+  s_propSep("::$"),
+  s_constSep("::");
 
 void CmdInfo::sendImpl(DebuggerThriftBuffer &thrift) {
   DebuggerCommand::sendImpl(thrift);
@@ -69,7 +72,7 @@ void CmdInfo::sendImpl(DebuggerThriftBuffer &thrift) {
     thrift.write(true);
     thrift.write((int8_t)DebuggerClient::AutoCompleteCount);
     for (int i = 0; i < DebuggerClient::AutoCompleteCount; i++) {
-      thrift.write(m_acLiveLists[i]);
+      thrift.write(m_acLiveLists->get(i));
     }
   } else {
     thrift.write(false);
@@ -84,12 +87,12 @@ void CmdInfo::recvImpl(DebuggerThriftBuffer &thrift) {
   bool hasLists;
   thrift.read(hasLists);
   if (hasLists) {
-    m_acLiveLists = DebuggerClient::CreateNewLiveLists();
+    m_acLiveLists = std::make_shared<DebuggerClient::LiveLists>();
     int8_t count;
     thrift.read(count);
     for (int i = 0; i < count; i++) {
       if (i < DebuggerClient::AutoCompleteCount) {
-        thrift.read(m_acLiveLists[i]);
+        thrift.read(m_acLiveLists->get(i));
       } else {
         std::vector<std::string> future;
         thrift.read(future);
@@ -221,44 +224,112 @@ String CmdInfo::GetProtoType(DebuggerClient &client, const std::string &cls,
   return String();
 }
 
+namespace {
+
+template <bool interface>
+void getClassSymbolNames(
+  std::shared_ptr<DebuggerClient::LiveLists>& liveLists
+) {
+  auto& classes = liveLists->get(DebuggerClient::AutoCompleteClasses);
+  auto& clsMethods = liveLists->get(DebuggerClient::AutoCompleteClassMethods);
+  auto& clsProperties =
+    liveLists->get(DebuggerClient::AutoCompleteClassProperties);
+  auto& clsConstants =
+    liveLists->get(DebuggerClient::AutoCompleteClassConstants);
+
+  for (AllCachedClasses ac; !ac.empty(); ) {
+    auto c = ac.popFront();
+    if (interface ? !(c->attrs() & AttrInterface) :
+        c->attrs() & (AttrInterface | AttrTrait)) {
+      continue;
+    }
+    classes.push_back(c->name()->toCppString());
+    for (Slot i = 0; i < c->numMethods(); i++) {
+      auto const meth = c->getMethod(i);
+      if (meth->isGenerated() || meth->cls() != c) continue;
+      clsMethods.push_back(meth->fullName()->toCppString());
+    }
+    for (Slot i = 0; i < c->numDeclProperties(); i++) {
+      auto& prop = c->declProperties()[i];
+      if (prop.m_class != c) continue;
+      auto prop_name = c->nameStr() + s_propSep + StrNR(prop.m_name);
+      clsProperties.push_back(prop_name.get()->toCppString());
+    }
+    for (Slot i = 0; i < c->numConstants(); i++) {
+      auto& cns = c->constants()[i];
+      if (cns.m_class != c) continue;
+      auto const_name = c->nameStr() + s_constSep + StrNR(cns.m_name);
+      clsConstants.push_back(const_name.get()->toCppString());
+    }
+  }
+}
+
+/* Caches an estimate of the number of named entities we have. */
+size_t methodSize = 128;
+size_t propSize   = 128;
+size_t constSize  = 128;
+
+void getSymbolNames(std::shared_ptr<DebuggerClient::LiveLists>& liveLists) {
+  auto& clsMethods = liveLists->get(DebuggerClient::AutoCompleteClassMethods);
+  auto& clsProperties =
+    liveLists->get(DebuggerClient::AutoCompleteClassProperties);
+  auto& clsConstants =
+    liveLists->get(DebuggerClient::AutoCompleteClassConstants);
+
+  clsMethods.reserve(methodSize);
+  clsProperties.reserve(propSize);
+  clsConstants.reserve(constSize);
+
+  getClassSymbolNames<false>(liveLists);
+  getClassSymbolNames<true>(liveLists);
+
+  if (methodSize < clsMethods.size()) {
+    methodSize = clsMethods.size();
+  }
+  if (propSize < clsProperties.size()) {
+    propSize = clsProperties.size();
+  }
+  if (constSize < clsConstants.size()) {
+    constSize = clsConstants.size();
+  }
+
+  auto& functions = liveLists->get(DebuggerClient::AutoCompleteFunctions);
+  auto& constants = liveLists->get(DebuggerClient::AutoCompleteConstants);
+
+  auto funcs1 = Unit::getSystemFunctions();
+  auto funcs2 = Unit::getUserFunctions();
+  functions.reserve(funcs1.size() + funcs2.size());
+  for (ArrayIter iter(funcs1); iter; ++iter) {
+    functions.push_back(iter.second().toString().toCppString());
+  }
+  for (ArrayIter iter(funcs2); iter; ++iter) {
+    functions.push_back(iter.second().toString().toCppString());
+  }
+  auto consts = lookupDefinedConstants();
+  constants.reserve(consts.size());
+  for (ArrayIter iter(consts); iter; ++iter) {
+    constants.push_back(iter.first().toString().toCppString());
+  }
+}
+
+}
+
 bool CmdInfo::onServer(DebuggerProxy &proxy) {
   if (m_type == KindOfLiveLists) {
-    std::vector<String> tmpAcLiveLists[DebuggerClient::AutoCompleteCount];
-    m_acLiveLists = DebuggerClient::CreateNewLiveLists();
+    m_acLiveLists = std::make_shared<DebuggerClient::LiveLists>();
 
     try {
-      ClassInfo::GetSymbolNames(
-        tmpAcLiveLists[DebuggerClient::AutoCompleteClasses],
-        tmpAcLiveLists[DebuggerClient::AutoCompleteFunctions],
-        tmpAcLiveLists[DebuggerClient::AutoCompleteConstants],
-        &tmpAcLiveLists[DebuggerClient::AutoCompleteClassMethods],
-        &tmpAcLiveLists[DebuggerClient::AutoCompleteClassProperties],
-        &tmpAcLiveLists[DebuggerClient::AutoCompleteClassConstants]);
-    } catch (Exception &e) {
+      getSymbolNames(m_acLiveLists);
+    } catch (Exception& e) {
       Logger::Error("Caught exception %s, auto-complete lists incomplete",
                     e.getMessage().c_str());
     } catch(...) {
       Logger::Error("Caught unknown exception, auto-complete lists incomplete");
     }
 
-    int tempList[] = {DebuggerClient::AutoCompleteClasses,
-                      DebuggerClient::AutoCompleteFunctions,
-                      DebuggerClient::AutoCompleteConstants,
-                      DebuggerClient::AutoCompleteClassMethods,
-                      DebuggerClient::AutoCompleteClassProperties,
-                      DebuggerClient::AutoCompleteClassConstants};
-
-    for (unsigned int i = 0 ; i < sizeof(tempList)/sizeof(int); ++i) {
-      for (unsigned int j = 0 ; j < tmpAcLiveLists[tempList[i]].size(); ++j) {
-        m_acLiveLists[tempList[i]].push_back(
-          tmpAcLiveLists[tempList[i]][j].toCppString());
-      }
-    }
-
     Array variables = g_context->getLocalDefinedVariables(0);
     variables += CmdVariable::GetGlobalVariables();
-    std::vector<std::string> &vars =
-      m_acLiveLists[DebuggerClient::AutoCompleteVariables];
+    auto& vars = m_acLiveLists->get(DebuggerClient::AutoCompleteVariables);
     vars.reserve(variables.size());
     for (ArrayIter iter(variables); iter; ++iter) {
       vars.push_back("$" + iter.first().toString().toCppString());
@@ -269,7 +340,7 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
 
   if (m_type == KindOfUnknown || m_type == KindOfClass) {
     try {
-      Array ret = HHVM_FN(hphp_get_class_info)(m_symbol);
+      Array ret = DebuggerReflection::get_class_info(m_symbol);
       if (!ret.empty()) {
         m_info.append(ret);
       }
@@ -277,7 +348,7 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
   }
   if (m_type == KindOfUnknown || m_type == KindOfFunction) {
     try {
-      Array ret = HHVM_FN(hphp_get_function_info)(m_symbol);
+      Array ret = DebuggerReflection::get_function_info(m_symbol);
       if (!ret.empty()) {
         m_info.append(ret);
       }
@@ -302,7 +373,7 @@ void CmdInfo::PrintDocComments(StringBuffer &sb, const Array& info) {
       space1 = matches1.toCArrRef()[1].toString().size();
       space2 = matches2.toCArrRef()[1].toString().size();
     }
-    String spaces = f_str_repeat(" ", space2 - space1 - 1);
+    String spaces = HHVM_FN(str_repeat)(" ", space2 - space1 - 1);
     sb.printf("%s%s\n", spaces.data(), doc.data());
   }
 }
@@ -380,7 +451,7 @@ String CmdInfo::GetModifier(const Array& info, const String& name) {
   if (info[name].toBoolean()) {
     return name + " ";
   }
-  return empty_string;
+  return empty_string();
 }
 
 String CmdInfo::FindSubSymbol(const Array& symbols, const std::string &symbol) {

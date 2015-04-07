@@ -8,10 +8,6 @@ class Foo {
 
 $instance = new Foo();
 
-// no exception ... caller-responsible for the object
-$b = new ReflectionMethod(null, null);
-var_dump($b instanceof ReflectionMethod);
-
 try {
   $b = new ReflectionMethod(null, 'noSuchMethod');
 } catch (ReflectionException $ex) {
@@ -34,3 +30,14 @@ $b = new ReflectionMethod($instance, 'method');
 var_dump($b instanceof ReflectionMethod);
 $b = new ReflectionMethod('Foo', 'method');
 var_dump($b instanceof ReflectionMethod);
+
+// Look for method 'method' in class 'Foo'
+var_dump((new ReflectionMethod('Foo', 'method'))->getName());
+var_dump((new ReflectionMethod(new Foo(), 'method'))->getName());
+var_dump((new ReflectionMethod('Foo::method'))->getName());
+// Look for method '' in class 'Foo'
+try {
+  var_dump((new ReflectionMethod('Foo', null))->getName());
+} catch (ReflectionException $ex) {
+  echo 'ReflectionException: ', $ex->getMessage(), "\n";
+}

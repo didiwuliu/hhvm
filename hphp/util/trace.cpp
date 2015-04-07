@@ -91,11 +91,17 @@ class Init {
         if (mod >= 0) {
           levels[mod] = level;
         }
-        if (mod == Trace::minstr ||
-            mod == Trace::interpOne ||
-            mod == Trace::dispatchBB ||
-            mod == Trace::dispatchN) {
-          levels[Trace::statgroups] = std::max(levels[Trace::statgroups], 1);
+
+        static auto const groups = {
+          Trace::minstr,
+          Trace::interpOne,
+          Trace::dispatchBB,
+        };
+        for (auto g : groups) {
+          if (mod == g) {
+            levels[Trace::statgroups] = std::max(levels[Trace::statgroups], 1);
+            break;
+          }
         }
       }
       free(e);
@@ -123,7 +129,8 @@ void flush() {
 
 void vtrace(const char *fmt, va_list ap) {
   static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
-  if (getenv("HPHP_TRACE_RINGBUFFER")) {
+  static bool hphp_trace_ringbuffer = getenv("HPHP_TRACE_RINGBUFFER");
+  if (hphp_trace_ringbuffer) {
     vtraceRingbuffer(fmt, ap);
   } else {
     ONTRACE(1, pthread_mutex_lock(&mtx));
@@ -173,4 +180,3 @@ std::string prettyNode(const char* name, const std::string& s) {
 }
 
 } } // HPHP::Trace
-

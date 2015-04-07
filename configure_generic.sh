@@ -5,7 +5,7 @@
 #########################################
 
 # Current Script details
-SCRIPT="$(readlink -f ${BASH_SOURCE[0]})"
+SCRIPT="$(readlink -f $0)"
 SCRIPT_DIR="$(dirname $SCRIPT)"
 PWD=$(readlink -f `pwd`)
 
@@ -91,26 +91,25 @@ case $DISTRO in
 
         # install apt-fast to speed up later dependency installation
         sudo add-apt-repository -y ppa:apt-fast/stable
-        sudo add-apt-repository -y ppa:mapnik/boost
+        sudo add-apt-repository -y ppa:boost-latest/ppa
         sudo apt-get -y update
         sudo apt-get -y install apt-fast
 
         # install the actual dependencies
         sudo apt-fast -y update
-        sudo apt-fast -y install git-core cmake g++ libboost1.49-dev libmysqlclient-dev \
+        sudo apt-fast -y install git-core cmake g++ boost1.55 libmysqlclient-dev \
             libxml2-dev libmcrypt-dev libicu-dev openssl build-essential binutils-dev \
             libcap-dev libgd2-xpm-dev zlib1g-dev libtbb-dev libonig-dev libpcre3-dev \
-            autoconf libtool libcurl4-openssl-dev libboost-regex1.49-dev libboost-system1.49-dev \
-            libboost-program-options1.49-dev libboost-filesystem1.49-dev libboost-thread1.49-dev \
             wget memcached libreadline-dev libncurses-dev libmemcached-dev libbz2-dev \
             libc-client2007e-dev php5-mcrypt php5-imagick libgoogle-perftools-dev \
             libcloog-ppl0 libelf-dev libdwarf-dev libunwind7-dev subversion \
+            autoconf libtool libcurl4-openssl-dev \
             libmagickwand-dev libxslt1-dev &
 
         git clone git://github.com/libevent/libevent.git --quiet &
         git clone git://github.com/bagder/curl.git --quiet &
         svn checkout http://google-glog.googlecode.com/svn/trunk/ google-glog --quiet &
-        wget http://www.canonware.com/download/jemalloc/jemalloc-3.5.1.tar.bz2 --quiet &
+        wget -nc http://www.canonware.com/download/jemalloc/jemalloc-3.6.0.tar.bz2 --quiet &
         ;;
     *)
         echo "Unknown distribution. Please update packages in this section."
@@ -119,7 +118,7 @@ case $DISTRO in
 esac
 
 # init submodules
-git submodule update --init
+git submodule update --init --recursive
 
 # wait until all background processes finished
 FAIL=0
@@ -142,10 +141,7 @@ if [[ "x$DISTRO" == "xubuntu" ]];then
     # Leave this install till after the main parallel package install above
     # since it adds a non-12.04 package repo and we don't want to
     # pull EVERYTHING in, just the newer gcc compiler (and toolchain)
-    GCC_VER=4.7
-    if [ "x${TRAVIS}" != "x" ]; then
-      GCC_VER=4.8
-    fi
+    GCC_VER=4.8
     sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
     sudo apt-get -y update
     sudo apt-get -y install gcc-${GCC_VER} g++-${GCC_VER}
@@ -159,7 +155,7 @@ fi
 # libevent
 cd libevent
 git checkout release-1.4.14b-stable
-cat ../hphp/third_party/libevent-1.4.14.fb-changes.diff | patch -p1
+cat ../third-party/libevent-1.4.14.fb-changes.diff | patch -p1
 ./autogen.sh
 ./configure --prefix=$CMAKE_PREFIX_PATH
 make -j $CPUS
@@ -183,22 +179,22 @@ if [[ "x$DISTRO" == "xubuntu" ]];then
     cd ..
 
     # jemaloc
-    tar xjvf jemalloc-3.5.1.tar.bz2
-    cd jemalloc-3.5.1
+    tar xjvf jemalloc-3.6.0.tar.bz2
+    cd jemalloc-3.6.0
     ./configure --prefix=$CMAKE_PREFIX_PATH
     make -j $CPUS
     make install
     cd ..
 
     # cleanup
-    rm -rf google-glog jemalloc-3.5.1.tar.bz2 jemalloc-3.5.1
+    rm -rf google-glog jemalloc-3.6.0.tar.bz2 jemalloc-3.6.0
 fi
 
 # cleanup
 rm -rf libevent curl
 
 # hphp
-cmake .
+cmake "$@" .
 
 # all set
 echo "-------------------------------------------------------------------------"

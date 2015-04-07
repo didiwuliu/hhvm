@@ -21,7 +21,7 @@
 #include <vector>
 #include <stdarg.h>
 
-#include "folly/Format.h"
+#include <folly/Format.h>
 
 #include "hphp/util/assertions.h"
 #include "hphp/util/portability.h"
@@ -35,7 +35,7 @@
  * env TRACE=mcg:1,bcinterp:3,tmp0:1 ./hhvm/hhvm ...
  *
  * In a source file, select the compilation unit's module by calling the
- * TRACE_SET_MODE macro. E.g.,
+ * TRACE_SET_MOD macro. E.g.,
  *
  *   TRACE_SET_MOD(mcg);
  *
@@ -86,69 +86,83 @@ namespace HPHP {
 namespace Trace {
 
 #define TRACE_MODULES \
-      TM(tprefix)     /* Meta: prefix with string */          \
+      TM(tprefix)     /* Meta: prefix with string */  \
       TM(traceAsync)  /* Meta: lazy writes to disk */ \
-      TM(trans)       \
-      TM(mcg)        \
-      TM(mcgstats)   \
-      TM(ringbuffer)  \
-      TM(ustubs)      \
-      TM(unwind)      \
-      TM(txlease)     \
-      TM(fixup)       \
-      TM(tcspace)     \
-      TM(targetcache) \
-      TM(treadmill)   \
-      TM(regalloc)    \
-      TM(bcinterp)    \
-      TM(interpOne)   \
-      TM(dispatchBB)  \
-      TM(dispatchN)   \
-      TM(refcount)    \
-      TM(asmx64)      \
-      TM(runtime)     \
-      TM(debugger)    \
-      TM(debuggerflow) \
-      TM(debuginfo)   \
-      TM(stats)       \
-      TM(emitter)     \
-      TM(hhbbc)       \
-      TM(hhbbc_index) \
-      TM(hhbbc_time)  \
-      TM(hhbbc_emit)  \
-      TM(hhbbc_dump)  \
-      TM(hhbbc_dce)   \
-      TM(hhbc)        \
-      TM(stat)        \
-      TM(fr)          \
-      TM(intercept)   \
-      TM(txdeps)      \
-      TM(typeProfile) \
-      TM(hhir)        \
-      TM(printir)     \
-      TM(pgo)         \
+      TM(asmx64)        \
+      TM(atomicvector)  \
+      TM(bcinterp)      \
+      TM(datablock)     \
+      TM(debugger)      \
+      TM(debuggerflow)  \
+      TM(debuginfo)     \
+      TM(dispatchBB)    \
+      TM(fixup)         \
+      TM(fr)            \
+      TM(gc)            \
+      TM(heap)          \
+      TM(hhas)          \
+      TM(hhbbc)         \
+      TM(hhbbc_dce)     \
+      TM(hhbbc_dump)    \
+      TM(hhbbc_emit)    \
+      TM(hhbbc_index)   \
+      TM(hhbbc_time)    \
+      TM(hhbc)          \
+      TM(vasm)          \
+      TM(hhir)          \
       TM(hhirTracelets) \
-      TM(gc)          \
-      TM(instancebits)\
-      TM(hhas)        \
-      TM(statgroups)  \
-      TM(minstr)      \
-      TM(region)      \
-      TM(atomicvector)\
-      TM(datablock)   \
-      TM(jittime)     \
+      TM(hhir_dce)      \
+      TM(hhir_store)    \
+      TM(hhir_alias)    \
+      TM(hhir_load)     \
+      TM(hhir_refineTmps) \
+      TM(hhir_gvn)      \
+      TM(llvm)          \
+      TM(llvm_count)    \
+      TM(hhir_refcount) \
+      TM(inlining)      \
+      TM(instancebits)  \
+      TM(intercept)     \
+      TM(interpOne)     \
+      TM(jittime)       \
+      TM(libxml)        \
+      TM(mcg)           \
+      TM(mcgstats)      \
+      TM(minstr)        \
+      TM(pgo)           \
+      TM(printir)       \
+      TM(rat)           \
+      TM(refcount)      \
+      TM(regalloc)      \
+      TM(region)        \
+      TM(ringbuffer)    \
+      TM(runtime)       \
+      TM(servicereq)    \
+      TM(simplify)      \
+      TM(smartalloc)    \
+      TM(heaptrace)     \
+      TM(stat)          \
+      TM(statgroups)    \
+      TM(stats)         \
+      TM(targetcache)   \
+      TM(tcspace)       \
+      TM(trans)         \
+      TM(treadmill)     \
+      TM(txdeps)        \
+      TM(txlease)       \
+      TM(typeProfile)   \
+      TM(unwind)        \
+      TM(ustubs)        \
+      TM(xenon)         \
+      TM(objprof)       \
+      TM(xls)           \
       /* Stress categories, to exercise rare paths */ \
-      TM(stress_txInterpPct)    \
-      TM(stress_txInterpSeed)   \
+      TM(stress_txInterpPct)  \
+      TM(stress_txInterpSeed) \
       /* Jit bisection interval */ \
-      TM(txOpBisectLow) \
-      TM(txOpBisectHigh) \
-      /* smart alloc */ \
-      TM(smartalloc) \
-      /* Heap tracing */ \
-      TM(heap) \
-      TM(servicereq) \
-      /* Temporary catetories, to save compilation time */ \
+      TM(txOpBisectLow)   \
+      TM(txOpBisectHigh)  \
+      /* Temporary categories, to save compilation time */ \
       TM(tmp0)  TM(tmp1)  TM(tmp2)  TM(tmp3)               \
       TM(tmp4)  TM(tmp5)  TM(tmp6)  TM(tmp7)               \
       TM(tmp8)  TM(tmp9)  TM(tmp10) TM(tmp11)              \
@@ -173,7 +187,6 @@ enum Module {
  *
  * E.g.:
  *    (Location Stack 1)
- *    (RuntimeType (Location Stack 1) (Home (Location Local 1)))
  *
  * The repetitve prettyNode() templates are intended to aid
  * implementing pretty().
@@ -218,10 +231,9 @@ void ftraceRelease(Args&&... args) {
   traceRelease("%s", folly::format(std::forward<Args>(args)...).str().c_str());
 }
 
-// Trace to the global ring buffer in all builds, and also trace normally
-// via the standard TRACE(n, ...) macro.
-#define TRACE_RB(n, ...)                            \
-  HPHP::Trace::traceRingBufferRelease(__VA_ARGS__); \
+// Trace to the global ring buffer and the normal TRACE destination.
+#define TRACE_RB(n, ...)                                        \
+  ONTRACE(n, HPHP::Trace::traceRingBufferRelease(__VA_ARGS__)); \
   TRACE(n, __VA_ARGS__);
 void traceRingBufferRelease(const char* fmt, ...) ATTRIBUTE_PRINTF(1,2);
 
@@ -242,7 +254,7 @@ struct BumpRelease {
     if (m_live) tl_levels[m_mod] -= m_adjust;
   }
 
-  BumpRelease(BumpRelease&& o)
+  BumpRelease(BumpRelease&& o) noexcept
     : m_live(o.m_live)
     , m_mod(o.m_mod)
     , m_adjust(o.m_adjust)
@@ -302,7 +314,7 @@ const bool enabled = true;
   ONTRACE_MOD(mod, level, HPHP::Trace::trace("%s",      \
              folly::format(__VA_ARGS__).str().c_str()))
 #define TRACE_SET_MOD(name)  \
-  static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
+  UNUSED static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
 
 /*
  * The Indent struct and ITRACE are used for tracing with nested
@@ -330,6 +342,8 @@ inline void itraceImpl(const char* fmtRaw, Args&&... args) {
   Trace::ftraceRelease(fmt, std::forward<Args>(args)...);
 }
 #define ITRACE(level, ...) ONTRACE((level), Trace::itraceImpl(__VA_ARGS__));
+#define ITRACE_MOD(mod, level, ...)                             \
+  ONTRACE_MOD(mod, level, Trace::itraceImpl(__VA_ARGS__));
 
 void trace(const char *, ...) ATTRIBUTE_PRINTF(1,2);
 void trace(const std::string&);
@@ -433,4 +447,3 @@ struct FormatValue<Val,
 }
 
 #endif /* incl_HPHP_TRACE_H_ */
-

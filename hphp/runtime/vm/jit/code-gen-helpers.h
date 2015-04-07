@@ -17,53 +17,18 @@
 #ifndef incl_HPHP_VM_CODEGENHELPERS_H_
 #define incl_HPHP_VM_CODEGENHELPERS_H_
 
+#include "hphp/runtime/vm/member-operations.h"
+#include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/vm/jit/type.h"
-#include "hphp/runtime/vm/jit/phys-reg.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
 
-namespace HPHP { namespace JIT {
+#include "hphp/util/abi-cxx.h"
 
-struct CppCall {
-  template<class Ret, class... Args>
-  explicit CppCall(Ret (*pfun)(Args...))
-    : m_kind(Direct)
-    , m_fptr(reinterpret_cast<void*>(pfun))
-  {}
+namespace HPHP { namespace jit {
 
-  explicit CppCall(void* p)
-    : m_kind(Direct)
-    , m_fptr(p)
-  {}
-
-  explicit CppCall(int off) : m_kind(Virtual), m_offset(off) {}
-
-  explicit CppCall(PhysReg reg)
-    : m_kind(Indirect)
-    , m_reg(reg)
-  {}
-
-  CppCall(CppCall const&) = default;
-
-  bool isDirect()   const { return m_kind == Direct;  }
-  bool isVirtual()  const { return m_kind == Virtual; }
-  bool isIndirect() const { return m_kind == Indirect; }
-
-  const void*       getAddress() const { return m_fptr; }
-  int               getOffset()  const { return m_offset; }
-  PhysReg           getReg()     const { return m_reg; }
-
-  void updateCallIndirect(PhysReg reg) {
-    assert(isIndirect());
-    m_reg = reg;
-  }
-
- private:
-  enum { Direct, Virtual, Indirect } m_kind;
-  union {
-    void* m_fptr;
-    int   m_offset;
-    PhysReg m_reg;
-  };
-};
+//////////////////////////////////////////////////////////////////////
 
 /*
  * SaveFP uses rVmFp, as usual. SavePC requires the caller to have
@@ -84,6 +49,67 @@ inline RegSaveFlags operator&(const RegSaveFlags& l, const RegSaveFlags& r) {
 inline RegSaveFlags operator~(const RegSaveFlags& f) {
   return RegSaveFlags(~int(f));
 }
+
+template <class T, class F>
+Vreg cond(Vout& v, ConditionCode cc, Vreg sf, Vreg dst, T t, F f) {
+  auto fblock = v.makeBlock();
+  auto tblock = v.makeBlock();
+  auto done = v.makeBlock();
+  v << jcc{cc, sf, {fblock, tblock}};
+  v = tblock;
+  auto treg = t(v);
+  v << phijmp{done, v.makeTuple(VregList{treg})};
+  v = fblock;
+  auto freg = f(v);
+  v << phijmp{done, v.makeTuple(VregList{freg})};
+  v = done;
+  v << phidef{v.makeTuple(VregList{dst})};
+  return dst;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Information about an array key (this represents however much we know about
+ * whether the key is going to behave like an integer or a string).
+ */
+struct ArrayKeyInfo {
+  int64_t convertedInt{0};
+  KeyType type{KeyType::Any};
+
+  // If true, the string could dynamically contain an integer-like string,
+  // which needs to be checked.
+  bool checkForInt{false};
+
+  // If true, useKey is an integer constant we've materialized, by converting a
+  // string `key' that was strictly an integer.
+  bool converted{false};
+};
+
+inline ArrayKeyInfo checkStrictlyInteger(Type key) {
+  auto ret = ArrayKeyInfo{};
+
+  if (key <= Type::Int) {
+    ret.type = KeyType::Int;
+    return ret;
+  }
+  assertx(key <= Type::Str);
+  ret.type = KeyType::Str;
+  if (key.hasConstVal()) {
+    int64_t i;
+    if (key.strVal()->isStrictlyInteger(i)) {
+      ret.converted    = true;
+      ret.type         = KeyType::Int;
+      ret.convertedInt = i;
+    }
+  } else {
+    ret.checkForInt = true;
+  }
+
+  return ret;
+}
+
+//////////////////////////////////////////////////////////////////////
 
 }}
 

@@ -79,19 +79,9 @@ struct ProfileDump {
     m_numDumps = 1;
     auto &current = m_currentlyAllocated[trace];
     current -= size;
-    assert(current.m_count >= 0 && current.m_bytes >= 0);
   }
 
   std::string toPProfFormat() const;
-
-  template<typename F>
-  void forEachAddress(F fun) const {
-    for (const auto &data : m_accumAllocated) {
-      for (const SrcKey &sk : data.first) {
-        fun(sk);
-      }
-    }
-  }
 
   // merge operation: takes another dump and adds all of its data.
   // used for global dumps that require logging from multiple VM
@@ -149,8 +139,8 @@ struct ProfileController {
   static bool isTracking();
   static bool isProfiling();
   static ProfileType profileType();
-private:
-  static void cleanup(const std::unique_lock<std::mutex>& lock);
+
+  static void enqueueOrphanedUnit(const Unit*);
 };
 
 }

@@ -19,11 +19,11 @@ let unittest testdir =
         let (d,b,_e) = Common2.dbe_of_filename expfile in
         let phpfile = Common2.filename_of_dbe (d,b,"php") in
 
-        (match Hackificator.hackify_thrift phpfile with
+        (match Hackificator.hackify ~upgrade:false "<?hh" phpfile with
         | None ->
           assert_failure (spf "hackificator should at least modify %s" phpfile)
         | Some new_content ->
-          let tmpfile = Common.new_temp_file "hackifiy" "php" in
+          let tmpfile = Common.new_temp_file "hackify" "php" in
           Common.write_file ~file:tmpfile new_content;
         
           let diff = Common2.unix_diff tmpfile expfile in

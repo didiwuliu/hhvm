@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_UCSDET_H
 #define incl_HPHP_ICU_UCSDET_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ucsdet.h>
@@ -30,7 +30,7 @@ class EncodingDetector : public IntlError {
     ucsdet_close(m_encodingDetector);
   }
 
-  static EncodingDetector* Get(Object obj) {
+  static EncodingDetector* Get(ObjectData* obj) {
     return GetData<EncodingDetector>(obj, s_EncodingDetector);
   }
 
@@ -96,7 +96,7 @@ class EncodingMatch : public IntlError {
     return ret;
   }
 
-  static EncodingMatch* Get(Object obj) {
+  static EncodingMatch* Get(ObjectData* obj) {
     return GetData<EncodingMatch>(obj, s_EncodingMatch);
   }
 

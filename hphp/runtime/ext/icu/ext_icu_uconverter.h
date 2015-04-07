@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_ITERATOR_H
 #define incl_HPHP_ICU_ITERATOR_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ucnv.h>
@@ -28,18 +28,11 @@ public:
     }
     return *this;
   }
-  ~IntlUConverter() {
-    if (m_src) {
-      ucnv_close(m_src);
-    }
-    if (m_dest) {
-      ucnv_close(m_dest);
-    }
-  }
+  ~IntlUConverter() { }
 
   bool isValid() const { return true; }
 
-  static IntlUConverter* Get(Object obj) {
+  static IntlUConverter* Get(ObjectData* obj) {
     return GetData<IntlUConverter>(obj, s_UConverter);
   }
 

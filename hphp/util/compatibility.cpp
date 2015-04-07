@@ -15,6 +15,7 @@
 */
 
 #include "hphp/util/compatibility.h"
+#include "hphp/util/assertions.h"
 #include "hphp/util/vdso.h"
 
 #include <cstdarg>
@@ -63,8 +64,11 @@ int dprintf(int fd, const char *format, ...) {
 }
 #endif
 
-int gettime(clockid_t which_clock, struct timespec *tp) {
-#if defined(__APPLE__) || defined(__FreeBSD__)
+static int gettime_helper(clockid_t which_clock, struct timespec *tp) {
+#if defined(__CYGWIN__)
+  // let's bypass trying to load vdso
+  return clock_gettime(which_clock, tp);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
   // XXX: OSX doesn't support realtime so we ignore which_clock
   struct timeval tv;
   int ret = gettimeofday(&tv, nullptr);
@@ -80,6 +84,25 @@ int gettime(clockid_t which_clock, struct timespec *tp) {
 #endif
 }
 
+__thread int64_t s_extra_request_microseconds;
+int gettime(clockid_t which_clock, struct timespec* tp) {
+  auto ret = gettime_helper(which_clock, tp);
+#ifdef CLOCK_THREAD_CPUTIME_ID
+  if (which_clock == CLOCK_THREAD_CPUTIME_ID) {
+    always_assert(tp->tv_nsec < 1000000000);
+
+    tp->tv_sec += s_extra_request_microseconds / 1000000;
+    auto res = tp->tv_nsec + (s_extra_request_microseconds % 1000000) * 1000;
+    if (res > 1000000000) {
+      res -= 1000000000;
+      tp->tv_sec += 1;
+    }
+    tp->tv_nsec = res;
+  }
+#endif
+  return ret;
+}
+
 int64_t gettime_diff_us(const timespec &start, const timespec &end) {
   int64_t dsec = end.tv_sec - start.tv_sec;
   int64_t dnsec = end.tv_nsec - start.tv_nsec;
@@ -93,6 +116,52 @@ int fadvise_dontneed(int fd, off_t len) {
   return posix_fadvise(fd, 0, len, POSIX_FADV_DONTNEED);
 #endif
 }
+
+#if defined(__CYGWIN__)
+#include <windows.h>
+#include <libintl.h>
+
+// since we only support win 7+
+// capturestackbacktrace is always available in kernel
+int backtrace (void **buffer, int size) {
+  USHORT frames;
+
+  if (size <= 0) {
+    return 0;
+  }
+
+  frames = CaptureStackBackTrace(0, (DWORD) size, buffer, nullptr);
+
+  return (int) frames;
+}
+
+int dladdr(const void *addr, Dl_info *info) {
+  MEMORY_BASIC_INFORMATION mem_info;
+  HMODULE module;
+  char moduleName[MAX_PATH];
+
+  if(!VirtualQuery(addr, &mem_info, sizeof(mem_info))) {
+    return 0;
+  }
+
+  if(!GetModuleFileNameA(module, moduleName, sizeof(moduleName))) {
+    return 0;
+  }
+
+  info->dli_fname = (char *)(malloc(strlen(moduleName) + 1));
+  strcpy((char *)info->dli_fname, moduleName);
+  info->dli_fbase = mem_info.BaseAddress;
+  info->dli_sname = nullptr;
+  info->dli_saddr = (void *) addr;
+
+  return 1;
+}
+
+// libbfd on cygwin is broken, stub dgettext to make linker unstupid
+char * libintl_dgettext(const char *domainname, const char *msgid) {
+  return dgettext(domainname, msgid);
+}
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -48,7 +48,7 @@ struct Array;
  *
  * Because all constants defined in hhvm programs create a
  * process-lifetime string for the constant name, this module also
- * manages a mapping from constant names to RDS::Handles.
+ * manages a mapping from constant names to rds::Handles.
  */
 
 //////////////////////////////////////////////////////////////////////
@@ -89,11 +89,16 @@ StringData* lookupStaticString(const StringData* str);
 size_t makeStaticStringCount();
 
 /*
+ * Return total size of static strings in bytes
+ */
+size_t makeStaticStringSize();
+
+/*
  * Functions mapping constants to RDS handles to their values in a
  * given request.
  */
-RDS::Handle lookupCnsHandle(const StringData* cnsName);
-RDS::Handle makeCnsHandle(const StringData* cnsName, bool persistent);
+rds::Handle lookupCnsHandle(const StringData* cnsName);
+rds::Handle makeCnsHandle(const StringData* cnsName, bool persistent);
 
 /*
  * Return an array of all the defined constants in the current

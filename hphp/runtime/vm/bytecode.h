@@ -30,19 +30,16 @@
 #include "hphp/runtime/vm/name-value-table.h"
 #include "hphp/runtime/vm/unit.h"
 
+#include "hphp/runtime/vm/jit/types.h"
+
 #include "hphp/util/arena.h"
 
 #include <type_traits>
 
 namespace HPHP {
+struct Resumable;
 
-/**
- * These macros allow us to easily change the arguments to iop*() opcode
- * implementations.
- */
-#define IOP_ARGS        PC& pc
-#define IOP_PASS_ARGS   pc
-#define IOP_PASS(pc)    pc
+#define EVAL_FILENAME_SUFFIX ") : eval()'d code"
 
 ALWAYS_INLINE
 void SETOP_BODY_CELL(Cell* lhs, SetOpOp op, Cell* rhs) {
@@ -54,6 +51,7 @@ void SETOP_BODY_CELL(Cell* lhs, SetOpOp op, Cell* rhs) {
   case SetOpOp::MinusEqual:     cellSubEq(*lhs, *rhs); return;
   case SetOpOp::MulEqual:       cellMulEq(*lhs, *rhs); return;
   case SetOpOp::DivEqual:       cellDivEq(*lhs, *rhs); return;
+  case SetOpOp::PowEqual:       cellPowEq(*lhs, *rhs); return;
   case SetOpOp::ModEqual:       cellModEq(*lhs, *rhs); return;
   case SetOpOp::ConcatEqual:
     concat_assign(tvAsVariant(lhs), cellAsCVarRef(*rhs).toString());
@@ -61,15 +59,8 @@ void SETOP_BODY_CELL(Cell* lhs, SetOpOp op, Cell* rhs) {
   case SetOpOp::AndEqual:       cellBitAndEq(*lhs, *rhs); return;
   case SetOpOp::OrEqual:        cellBitOrEq(*lhs, *rhs);  return;
   case SetOpOp::XorEqual:       cellBitXorEq(*lhs, *rhs); return;
-
-  case SetOpOp::SlEqual:
-    cellCastToInt64InPlace(lhs);
-    lhs->m_data.num <<= cellToInt(*rhs);
-    return;
-  case SetOpOp::SrEqual:
-    cellCastToInt64InPlace(lhs);
-    lhs->m_data.num >>= cellToInt(*rhs);
-    return;
+  case SetOpOp::SlEqual:        cellShlEq(*lhs, *rhs); return;
+  case SetOpOp::SrEqual:        cellShrEq(*lhs, *rhs); return;
   case SetOpOp::PlusEqualO:     cellAddEqO(*lhs, *rhs); return;
   case SetOpOp::MinusEqualO:    cellSubEqO(*lhs, *rhs); return;
   case SetOpOp::MulEqualO:      cellMulEqO(*lhs, *rhs); return;
@@ -151,7 +142,14 @@ class VarEnv {
   NameValueTable m_nvTable;
   ExtraArgs* m_extraArgs;
   uint16_t m_depth;
-  bool m_global;
+  const bool m_global;
+
+ public:
+  template<class F> void scan(F& mark) const {
+    mark(m_nvTable);
+    // TODO #6511877 scan ExtraArgs. requires calculating numExtra
+    //mark(m_extraArgs);
+  }
 
  public:
   explicit VarEnv();
@@ -163,15 +161,15 @@ class VarEnv {
   static VarEnv* createLocal(ActRec* fp);
 
   // Allocate a global VarEnv.  Initially not attached to any frame.
-  static VarEnv* createGlobal();
+  static void createGlobal();
 
   VarEnv* clone(ActRec* fp) const;
 
-  void suspend(ActRec* oldFP, ActRec* newFP);
+  void suspend(const ActRec* oldFP, ActRec* newFP);
   void enterFP(ActRec* oldFP, ActRec* newFP);
   void exitFP(ActRec* fp);
 
-  void set(const StringData* name, TypedValue* tv);
+  void set(const StringData* name, const TypedValue* tv);
   void bind(const StringData* name, TypedValue* tv);
   void setWithRef(const StringData* name, TypedValue* tv);
   TypedValue* lookup(const StringData* name);
@@ -215,8 +213,8 @@ struct ActRec {
     // dependency.
     TypedValue _dummyA;
     struct {
-      uint64_t m_savedRbp;     // Previous hardware frame pointer/ActRec.
-      uint64_t m_savedRip;     // In-TC address to return to.
+      ActRec* m_sfp;         // Previous hardware frame pointer/ActRec.
+      uint64_t m_savedRip;   // In-TC address to return to.
     };
   };
   union {
@@ -226,10 +224,11 @@ struct ActRec {
       uint32_t m_soff;         // Saved offset of caller from beginning of
                                //   caller's Func's bytecode.
 
-      // Bits 0-29 are the number of function args.
-      // Bit 30 is whether this ActRec embedded in a Continuation object.
+      // Bits 0-28 are the number of function args.
+      // Bit 29 is whether the locals were already decrefd (used by unwinder)
+      // Bit 30 is whether this ActRec is embedded in a Resumable object.
       // Bit 31 is whether this ActRec came from FPushCtor*.
-      uint32_t m_numArgsAndGenCtorFlags;
+      uint32_t m_numArgsAndFlags;
     };
   };
   union {
@@ -252,52 +251,88 @@ struct ActRec {
   };
 
   // Get the next outermost VM frame, but if this is
-  // a re-entry frame, return ar
-  ActRec* arGetSfp() const;
+  // a re-entry frame, return nullptr
+  ActRec* sfp() const;
+
+  void setReturn(ActRec* fp, PC pc, void* retAddr);
+  void setJitReturn(void* addr);
+  void setReturnVMExit();
 
   // skip this frame if it is for a builtin function
   bool skipFrame() const;
 
   /**
-   * Accessors for the packed m_numArgsAndGenCtorFlags field. We track
+   * Accessors for the packed m_numArgsAndFlags field. We track
    * whether ActRecs came from FPushCtor* so that during unwinding we
    * can set the flag not to call destructors for objects whose
    * constructors exit via an exception.
    */
 
+  static constexpr int kNumArgsBits = 29;
+  static constexpr int kNumArgsMask = (1 << kNumArgsBits) - 1;
+  static constexpr int kFlagsMask   = ~kNumArgsMask;
+
+  static constexpr int kLocalsDecRefdShift = kNumArgsBits;
+  static constexpr int kResumedShift       = kNumArgsBits + 1;
+  static constexpr int kFPushCtorShift     = kNumArgsBits + 2;
+
+  static_assert(kFPushCtorShift <= 8 * sizeof(int32_t) - 1,
+                "Out of bits in ActRec");
+
+  static constexpr int kLocalsDecRefdMask = 1 << kLocalsDecRefdShift;
+  static constexpr int kResumedMask       = 1 << kResumedShift;
+  static constexpr int kFPushCtorMask     = 1 << kFPushCtorShift;
+
   int32_t numArgs() const {
-    return m_numArgsAndGenCtorFlags & ~(3u << 30);
+    return m_numArgsAndFlags & kNumArgsMask;
   }
 
-  bool inGenerator() const {
-    return m_numArgsAndGenCtorFlags & (1u << 30);
+  bool localsDecRefd() const {
+    return m_numArgsAndFlags & kLocalsDecRefdMask;
+  }
+
+  bool resumed() const {
+    return m_numArgsAndFlags & kResumedMask;
+  }
+
+  void setResumed() {
+    m_numArgsAndFlags |= kResumedMask;
   }
 
   bool isFromFPushCtor() const {
-    return m_numArgsAndGenCtorFlags & (1u << 31);
+    return m_numArgsAndFlags & kFPushCtorMask;
   }
 
   static inline uint32_t
-  encodeNumArgs(uint32_t numArgs, bool inGenerator, bool isFPushCtor) {
-    assert((numArgs & (1u << 30)) == 0);
-    return numArgs | (inGenerator << 30) | (isFPushCtor << 31);
+  encodeNumArgs(uint32_t numArgs, bool localsDecRefd, bool resumed,
+                bool isFPushCtor) {
+    assert((numArgs & kFlagsMask) == 0);
+    return numArgs |
+      (localsDecRefd << kLocalsDecRefdShift) |
+      (resumed       << kResumedShift) |
+      (isFPushCtor   << kFPushCtorShift);
   }
 
   void initNumArgs(uint32_t numArgs) {
-    m_numArgsAndGenCtorFlags = encodeNumArgs(numArgs, false, false);
+    m_numArgsAndFlags = encodeNumArgs(numArgs, false, false, false);
   }
 
-  void initNumArgsInGenerator(uint32_t numArgs) {
-    m_numArgsAndGenCtorFlags = encodeNumArgs(numArgs, true, false);
+  void initNumArgsFromResumable(uint32_t numArgs) {
+    m_numArgsAndFlags = encodeNumArgs(numArgs, false, true, false);
   }
 
   void initNumArgsFromFPushCtor(uint32_t numArgs) {
-    m_numArgsAndGenCtorFlags = encodeNumArgs(numArgs, false, true);
+    m_numArgsAndFlags = encodeNumArgs(numArgs, false, false, true);
   }
 
   void setNumArgs(uint32_t numArgs) {
-    m_numArgsAndGenCtorFlags = encodeNumArgs(numArgs, inGenerator(),
-                                             isFromFPushCtor());
+    m_numArgsAndFlags = encodeNumArgs(numArgs, localsDecRefd(), resumed(),
+                                      isFromFPushCtor());
+  }
+
+  void setLocalsDecRefd() {
+    assert(!localsDecRefd());
+    m_numArgsAndFlags |= kLocalsDecRefdMask;
   }
 
   static void* encodeThis(ObjectData* obj, Class* cls) {
@@ -352,71 +387,72 @@ struct ActRec {
    * accessors.
    */
 
-#define UNION_FIELD_ACCESSORS2(name1, type1, field1, name2, type2, field2) \
-  inline bool has##name1() const { \
-    return field1 && !(intptr_t(field1) & 1LL); \
-  } \
-  inline bool has##name2() const { \
-    return bool(intptr_t(field2) & 1LL); \
-  } \
-  inline type1 get##name1() const { \
-    assert(has##name1()); \
-    return field1; \
-  } \
-  inline type2 get##name2() const { \
-    assert(has##name2()); \
-    return (type2)(intptr_t(field2) & ~1LL); \
-  } \
-  inline void set##name1(type1 val) { \
-    field1 = val; \
-  } \
-  inline void set##name2(type2 val) { \
-    field2 = (type2)(intptr_t(val) | 1LL); \
-  } \
+  static constexpr int8_t kHasClassBit = 0x1;
+  static constexpr int8_t kClassMask   = ~kHasClassBit;
 
-#define UNION_FIELD_ACCESSORS3(name1, type1, field1, name2, type2, field2, name3, type3, field3) \
-  inline bool has##name1() const { \
-    return field1 && !(intptr_t(field1) & 3LL); \
-  } \
-  inline bool has##name2() const { \
-    return bool(intptr_t(field2) & 1LL); \
-  } \
-  inline bool has##name3() const { \
-    return bool(intptr_t(field3) & 2LL); \
-  } \
-  inline type1 get##name1() const { \
-    assert(has##name1()); \
-    return field1; \
-  } \
-  inline type2 get##name2() const { \
-    assert(has##name2()); \
-    return (type2)(intptr_t(field2) & ~1LL); \
-  } \
-  inline type3 get##name3() const { \
-    return (type3)(intptr_t(field3) & ~2LL); \
-  } \
-  inline void set##name1(type1 val) { \
-    field1 = val; \
-  } \
-  inline void set##name2(type2 val) { \
-    field2 = (type2)(intptr_t(val) | 1LL); \
-  } \
-  inline void set##name3(type3 val) { \
-    field3 = (type3)(intptr_t(val) | 2LL); \
+  inline bool hasThis() const {
+    return m_this && !(reinterpret_cast<intptr_t>(m_this) & kHasClassBit);
+  }
+  inline ObjectData* getThis() const {
+    assert(hasThis());
+    return m_this;
+  }
+  inline void setThis(ObjectData* val) {
+    m_this = val;
+  }
+  inline bool hasClass() const {
+    return reinterpret_cast<intptr_t>(m_cls) & kHasClassBit;
+  }
+  inline Class* getClass() const {
+    assert(hasClass());
+    return reinterpret_cast<Class*>(
+      reinterpret_cast<intptr_t>(m_cls) & kClassMask);
+  }
+  inline void setClass(Class* val) {
+    m_cls = reinterpret_cast<Class*>(
+      reinterpret_cast<intptr_t>(val) | kHasClassBit);
   }
 
-  // Note that reordering these is likely to require changes to the
-  // translator.
-  UNION_FIELD_ACCESSORS2(This, ObjectData*, m_this, \
-                         Class, Class*, m_cls)
-  static const int8_t kInvNameBit   = 0x1;
-  static const int8_t kExtraArgsBit = 0x2;
-  UNION_FIELD_ACCESSORS3(VarEnv, VarEnv*, m_varEnv, \
-                         InvName, StringData*, m_invName, \
-                         ExtraArgs, ExtraArgs*, m_extraArgs)
+  // Note that reordering these is likely to require changes to the translator.
+  static constexpr int8_t kInvNameBit    = 0x1;
+  static constexpr int8_t kInvNameMask   = ~kInvNameBit;
+  static constexpr int8_t kExtraArgsBit  = 0x2;
+  static constexpr int8_t kExtraArgsMask = ~kExtraArgsBit;
 
-#undef UNION_FIELD_ACCESSORS2
-#undef UNION_FIELD_ACCESSORS3
+  inline bool hasVarEnv() const {
+    return m_varEnv &&
+      !(reinterpret_cast<intptr_t>(m_varEnv) & (kInvNameBit | kExtraArgsBit));
+  }
+  inline bool hasInvName() const {
+    return reinterpret_cast<intptr_t>(m_invName) & kInvNameBit;
+  }
+  inline bool hasExtraArgs() const {
+    return reinterpret_cast<intptr_t>(m_extraArgs) & kExtraArgsBit;
+  }
+  inline VarEnv* getVarEnv() const {
+    assert(hasVarEnv());
+    return m_varEnv;
+  }
+  inline StringData* getInvName() const {
+    assert(hasInvName());
+    return reinterpret_cast<StringData*>(
+      reinterpret_cast<intptr_t>(m_invName) & kInvNameMask);
+  }
+  inline ExtraArgs* getExtraArgs() const {
+    return reinterpret_cast<ExtraArgs*>(
+      reinterpret_cast<intptr_t>(m_extraArgs) & kExtraArgsMask);
+  }
+  inline void setVarEnv(VarEnv* val) {
+    m_varEnv = val;
+  }
+  inline void setInvName(StringData* val) {
+    m_invName = reinterpret_cast<StringData*>(
+      reinterpret_cast<intptr_t>(val) | kInvNameBit);
+  }
+  inline void setExtraArgs(ExtraArgs* val) {
+    m_extraArgs = reinterpret_cast<ExtraArgs*>(
+      reinterpret_cast<intptr_t>(val) | kExtraArgsBit);
+  }
 
   // Accessors for extra arg queries.
   TypedValue* getExtraArg(unsigned ind) const {
@@ -426,6 +462,35 @@ struct ActRec {
            static_cast<TypedValue*>(0);
   }
 };
+
+static_assert(offsetof(ActRec, m_sfp) == 0,
+              "m_sfp should be at offset 0 of ActRec");
+
+/*
+ * Returns true iff ar represents a frame on the VM eval stack or a Resumable
+ * object on the PHP heap.
+ */
+bool isVMFrame(const ActRec* ar);
+
+/*
+ * Returns true iff the given address is one of the special debugger return
+ * helpers.
+ */
+bool isDebuggerReturnHelper(void* addr);
+
+/*
+ * If ar->m_savedRip points somewhere in the TC that is not a return helper,
+ * change it to point to an appropriate return helper. The two different
+ * versions are for the different needs of the C++ unwinder and debugger hooks,
+ * respectively.
+ */
+void unwindPreventReturnToTC(ActRec* ar);
+void debuggerPreventReturnToTC(ActRec* ar);
+
+/*
+ * Call debuggerPreventReturnToTC() on all live VM frames in this thread.
+ */
+void debuggerPreventReturnsToTC();
 
 inline int32_t arOffset(const ActRec* ar, const ActRec* other) {
   return (intptr_t(other) - intptr_t(ar)) / sizeof(TypedValue);
@@ -439,16 +504,12 @@ inline ActRec* arFromSpOffset(const ActRec *sp, int32_t offset) {
   return arAtOffset(sp, offset);
 }
 
-inline void arSetSfp(ActRec* ar, const ActRec* sfp) {
-  static_assert(offsetof(ActRec, m_savedRbp) == 0,
-                "m_savedRbp should be at offset 0 of ActRec");
-  static_assert(sizeof(ActRec*) <= sizeof(uint64_t),
-                "ActRec* must be <= 64 bits");
-  ar->m_savedRbp = (uint64_t)sfp;
-}
+void frame_free_locals_no_hook(ActRec* fp);
 
-inline TypedValue* arReturn(ActRec* ar, const Variant& value) {
+inline TypedValue* arReturn(ActRec* ar, Variant&& value) {
+  frame_free_locals_no_hook(ar);
   ar->m_r = *value.asTypedValue();
+  tvWriteNull(value.asTypedValue());
   return &ar->m_r;
 }
 
@@ -506,6 +567,11 @@ struct Fault {
       m_raiseOffset(kInvalidOffset),
       m_handledCount(0) {}
 
+  template<class F> void scan(F& mark) const {
+    if (m_faultType == Type::UserException) mark(m_userException);
+    else mark(m_cppException);
+  }
+
   union {
     ObjectData* m_userException;
     Exception* m_cppException;
@@ -539,6 +605,7 @@ class Stack {
                       // m_elms.
 
 public:
+  bool isAllocated() { return m_elms != nullptr; }
   void* getStackLowAddress() const { return m_elms; }
   void* getStackHighAddress() const { return m_base; }
   bool isValidAddress(uintptr_t v) {
@@ -547,12 +614,6 @@ public:
   void requestInit();
   void requestExit();
 
-private:
-  void toStringFrame(std::ostream& os, const ActRec* fp,
-                     int offset, const TypedValue* ftop,
-                     const std::string& prefix) const;
-
-public:
   static const int sSurprisePageSize;
   static const unsigned sMinStackElms;
   static void ValidateStackSize();
@@ -574,13 +635,13 @@ public:
     return m_top;
   }
 
-  static inline size_t topOfStackOffset() {
-    Stack *that = 0;
-    return (size_t)&that->m_top;
+  static constexpr size_t topOfStackOffset() {
+    return offsetof(Stack, m_top);
   }
 
+  static TypedValue* anyFrameStackBase(const ActRec* fp);
   static TypedValue* frameStackBase(const ActRec* fp);
-  static TypedValue* generatorStackBase(const ActRec* fp);
+  static TypedValue* resumableStackBase(const ActRec* fp);
 
   ALWAYS_INLINE
   size_t count() const {
@@ -601,7 +662,7 @@ public:
   void popC() {
     assert(m_top != m_base);
     assert(cellIsPlausible(*m_top));
-    tvRefcountedDecRefCell(m_top);
+    tvRefcountedDecRef(m_top);
     tvDebugTrash(m_top);
     m_top++;
   }
@@ -737,26 +798,14 @@ public:
     m_top->m_type = KindOfUninit;
   }
 
-  #define PUSH_METHOD(name, type, field, value)                               \
-  ALWAYS_INLINE void push##name() {                                           \
-    assert(m_top != m_elms);                                                  \
-    m_top--;                                                                  \
-    m_top->m_data.field = value;                                              \
-    m_top->m_type = type;                                                     \
+  template<DataType t, class T> void pushVal(T v) {
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<t>(v);
   }
-  PUSH_METHOD(True, KindOfBoolean, num, 1)
-  PUSH_METHOD(False, KindOfBoolean, num, 0)
-
-  #define PUSH_METHOD_ARG(name, type, field, argtype, arg)                    \
-  ALWAYS_INLINE void push##name(argtype arg) {                                \
-    assert(m_top != m_elms);                                                  \
-    m_top--;                                                                  \
-    m_top->m_data.field = arg;                                                \
-    m_top->m_type = type;                                                     \
-  }
-  PUSH_METHOD_ARG(Bool, KindOfBoolean, num, bool, b)
-  PUSH_METHOD_ARG(Int, KindOfInt64, num, int64_t, i)
-  PUSH_METHOD_ARG(Double, KindOfDouble, dbl, double, d)
+  ALWAYS_INLINE void pushBool(bool v) { pushVal<KindOfBoolean>(v); }
+  ALWAYS_INLINE void pushInt(int64_t v) { pushVal<KindOfInt64>(v); }
+  ALWAYS_INLINE void pushDouble(double v) { pushVal<KindOfDouble>(v); }
 
   // This should only be called directly when the caller has
   // already adjusted the refcount appropriately
@@ -859,10 +908,10 @@ public:
   }
 
   ALWAYS_INLINE
-  void replaceC(const Cell& c) {
+  void replaceC(const Cell c) {
     assert(m_top != m_base);
     assert(m_top->m_type != KindOfRef);
-    tvRefcountedDecRefCell(m_top);
+    tvRefcountedDecRef(m_top);
     *m_top = c;
   }
 
@@ -871,7 +920,7 @@ public:
   void replaceC() {
     assert(m_top != m_base);
     assert(m_top->m_type != KindOfRef);
-    tvRefcountedDecRefCell(m_top);
+    tvRefcountedDecRef(m_top);
     *m_top = make_tv<DT>();
   }
 
@@ -880,7 +929,7 @@ public:
   void replaceC(T value) {
     assert(m_top != m_base);
     assert(m_top->m_type != KindOfRef);
-    tvRefcountedDecRefCell(m_top);
+    tvRefcountedDecRef(m_top);
     *m_top = make_tv<DT>(value);
   }
 
@@ -960,7 +1009,7 @@ public:
 
 /*
  * Visit all the slots and pre-live ActRecs on a live eval stack,
- * handling FPI regions and generators correctly, and stopping when we
+ * handling FPI regions and resumables correctly, and stopping when we
  * reach the supplied activation record.
  *
  * The stack elements are visited from lower address to higher, with
@@ -980,19 +1029,17 @@ visitStackElems(const ActRec* const fp,
                 Offset const bcOffset,
                 ARFun arFun,
                 TVFun tvFun) {
-  const TypedValue* const base =
-    fp->inGenerator() ? Stack::generatorStackBase(fp)
-                      : Stack::frameStackBase(fp);
+  const TypedValue* const base = Stack::anyFrameStackBase(fp);
   MaybeConstTVPtr cursor = stackTop;
   assert(cursor <= base);
 
   if (auto fe = fp->m_func->findFPI(bcOffset)) {
     for (;;) {
       ActRec* ar;
-      if (!fp->inGenerator()) {
+      if (!fp->resumed()) {
         ar = arAtOffset(fp, -fe->m_fpOff);
       } else {
-        // fp is pointing into the continuation object. Since fpOff is
+        // fp is pointing into the Resumable struct. Since fpOff is
         // given as an offset from the frame pointer as if it were in
         // the normal place on the main stack, we have to reconstruct
         // that "normal place".
@@ -1018,6 +1065,17 @@ visitStackElems(const ActRec* const fp,
     tvFun(cursor++);
   }
 }
+
+void resetCoverageCounters();
+
+// The interpOne*() methods implement individual opcode handlers.
+using InterpOneFunc = jit::TCA (*) (ActRec*, TypedValue*, Offset);
+extern InterpOneFunc interpOneEntryPoints[];
+
+bool doFCallArrayTC(PC pc);
+bool doFCall(ActRec* ar, PC& pc);
+jit::TCA dispatchBB();
+void pushLocalsAndIterators(const Func* func, int nparams = 0);
 
 ///////////////////////////////////////////////////////////////////////////////
 

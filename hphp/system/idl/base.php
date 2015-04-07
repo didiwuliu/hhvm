@@ -118,7 +118,7 @@ function get_php_name($type, $null = 'mixed') {
 // flags
 
 // ClassInfo attributes, and these numbers need to be consistent with them!
-define('ZendParamModeNull',              1 <<  0);
+define('ParamCoerceModeNull',              1 <<  0);
 define('IsAbstract',                     1 <<  4);
 define('IsFinal',                        1 <<  5);
 define('IsPublic',                       1 <<  6);
@@ -134,23 +134,20 @@ define('IsCppSerializable',              1 << 15);
 define('HipHopSpecific',                 1 << 16);
 define('VariableArguments',              1 << 17);
 define('RefVariableArguments',           1 << 18);
-define('MixedVariableArguments',         1 << 19);
 define('FunctionIsFoldable',             1 << 20);
 define('NoEffect',                       1 << 21);
 define('NoInjection',                    1 << 22);
 define('HasOptFunction',                 1 << 23);
 define('AllowIntercept',                 1 << 24);
 define('NoProfile',                      1 << 25);
-define('ContextSensitive',               1 << 26);
 define('NoDefaultSweep',                 1 << 27);
 define('IsSystem',                       1 << 28);
 define('IsTrait',                        1 << 29);
-define('ZendParamModeFalse',             1 << 30);
+define('ParamCoerceModeFalse',             1 << 30);
 define('NoFCallBulitin',                 1 << 31);
 
 // Mask for checking the flags related to variable arguments
-define('VarArgsMask', (VariableArguments | RefVariableArguments |
-                       MixedVariableArguments));
+define('VarArgsMask', (VariableArguments | RefVariableArguments));
 
 function get_flag_names($arr, $name, $global_func) {
   $flag = 0;
@@ -173,14 +170,12 @@ function get_flag_names($arr, $name, $global_func) {
   if ($flag & HipHopSpecific        ) $ret .= ' | HipHopSpecific'        ;
   if ($flag & VariableArguments     ) $ret .= ' | VariableArguments'     ;
   if ($flag & RefVariableArguments  ) $ret .= ' | RefVariableArguments'  ;
-  if ($flag & MixedVariableArguments) $ret .= ' | MixedVariableArguments';
   if ($flag & FunctionIsFoldable    ) $ret .= ' | FunctionIsFoldable'    ;
   if ($flag & NoEffect              ) $ret .= ' | NoEffect'              ;
   if ($flag & NoInjection           ) $ret .= ' | NoInjection'           ;
   if ($flag & HasOptFunction        ) $ret .= ' | HasOptFunction'        ;
   if ($flag & AllowIntercept        ) $ret .= ' | AllowIntercept'        ;
   if ($flag & NoProfile             ) $ret .= ' | NoProfile'             ;
-  if ($flag & ContextSensitive      ) $ret .= ' | ContextSensitive'      ;
   if ($flag & NoDefaultSweep        ) $ret .= ' | NoDefaultSweep'        ;
   if ($flag & IsTrait               ) $ret .= ' | IsTrait'               ;
   if ($flag & NoFCallBuiltin        ) $ret .= ' | NoFCallBuiltin'        ;
@@ -488,7 +483,7 @@ function get_serialized_default($s) {
       preg_match('/^(true|false|null)$/', $s)) {
     return serialize(eval("return $s;"));
   }
-  if ($s == "empty_array") return serialize(array());
+  if ($s == "empty_array_ref") return serialize(array());
   if (preg_match('/^null_(string|array|object|resource|variant)$/', $s)) {
     return serialize(null);
   }
@@ -893,7 +888,7 @@ function generateFuncCPPImplementation($func, $f, $prefix = 'f_') {
     fprintf($f, ', CArrRef _argv /* = null_array */');
   }
   fprintf($f, ") {\n");
-  fprintf($f, "  throw NotImplementedException(__func__);\n");
+  fprintf($f, "  throw_not_implemented(__func__);\n");
   fprintf($f, "}\n\n");
 }
 

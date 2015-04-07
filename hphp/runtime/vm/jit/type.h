@@ -17,60 +17,147 @@
 #ifndef incl_HPHP_JIT_TYPE_H_
 #define incl_HPHP_JIT_TYPE_H_
 
+#include "hphp/runtime/base/array-data.h"
+#include "hphp/runtime/base/datatype.h"
+#include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/repo-auth-type.h"
-#include "hphp/runtime/base/string-data.h"
-#include "hphp/runtime/base/type-array.h"
-
-#include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/type-specialization.h"
 
-#include "hphp/util/data-block.h"
-
-#include "folly/Optional.h"
+#include <folly/Optional.h>
 
 #include <cstdint>
-#include <cstring>
+#include <type_traits>
 
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
+
+struct ArrayData;
+struct Class;
 struct Func;
+struct Shape;
+struct StringData;
+struct TypedValue;
 
-namespace JIT {
-struct DynLocation;
-struct RuntimeType;
-}
-namespace JIT {
+namespace jit {
+///////////////////////////////////////////////////////////////////////////////
 
-namespace constToBits_detail {
-  template<class T>
-  struct needs_promotion
-    : std::integral_constant<
-        bool,
-        std::is_integral<T>::value ||
-          std::is_same<T,bool>::value ||
-          std::is_enum<T>::value
-      >
-  {};
+/*
+ * The Ptr enum is a sub-lattice for the PtrToFoo types, giving types like
+ * PtrToFrameInt, PtrToGblBool, etc.
+ *
+ * The values must be less than 32, for packing into Type below (we are using 5
+ * bits for it right now).  We have a pointer "kind" for each of the major
+ * segregated locations in which php values can live, and for most of them a
+ * union of that location with "inside of a Ref".  These classify PtrTo* types
+ * into some categories that cannot possibly alias, without any smarter
+ * analysis needed to prove it.  There is also a union for the various
+ * locations things can point after a fully generic member operation (see Memb
+ * below).
+ *
+ * The reason we have the category "Ref|Foo" for each of these Foos is that it
+ * is very common to need to do a generic unbox on some value if you have no
+ * type information.  For example:
+ *
+ *     t1 = LdPropAddr ...
+ *     t2 = UnboxPtr t1
+ *
+ * At this point, t2 is a pointer into either an object property or a inner
+ * RefData, which will be a PtrToRPropCell, which means it still can't alias,
+ * for example, a PtrToStkGen or a PtrToGblGen.  (Although it could generally
+ * alias a PtrToRGblGen because both could be inside the same RefData.)
+ */
+enum class Ptr : uint8_t {
+  Unk     = 0x00,
 
-  template<class T>
-  typename std::enable_if<needs_promotion<T>::value,uint64_t>::type
-  promoteIfNeeded(T t) { return static_cast<uint64_t>(t); }
+  Frame   = 0x01,
+  Stk     = 0x02,
+  Gbl     = 0x03,
+  Prop    = 0x04,
+  Arr     = 0x05,
+  SProp   = 0x06,
+  MIS     = 0x07,
+  /*
+   * Memb is a number of possible locations that result from the more generic
+   * types of member operations.
+   *
+   * This is a pointer to something living either an object property, an array
+   * element, a collection instance, the MinstrState, a object's dynamic
+   * property array, the init_null_variant or null_variant, or the
+   * lvalBlackHole.
+   *
+   * Fortunately they still can't alias the eval stack or frame locals, or
+   * globals or sprops.  And unless it has the R bit it can't point to an
+   * inner-RefData either.
+   */
+  Memb    = 0x08,
+  /*
+   * Pointer to class property initializer data.  These can never be refs, so
+   * we don't have a RClsInit type.
+   */
+  ClsInit = 0x09,
+  /*
+   * Pointer to class constant values in RDS.
+   */
+  ClsCns  = 0x0a,
 
-  template<class T>
-  typename std::enable_if<!needs_promotion<T>::value,T>::type
-  promoteIfNeeded(T t) { return t; }
-}
+  RFrame  = 0x11,
+  RStk    = 0x12,
+  RGbl    = 0x13,
+  RProp   = 0x14,
+  RArr    = 0x15,
+  RSProp  = 0x16,
+  RMIS    = 0x17,
+  RMemb   = 0x18,
 
-#define IRT_BOXES(name, bits)                                           \
-  IRT(name,             (bits))                                         \
-  IRT(Boxed##name,      (bits) << kBoxShift)                            \
-  IRT(PtrTo##name,      (bits) << kPtrShift)                            \
-  IRT(PtrToBoxed##name, (bits) << kPtrBoxShift)
+  Ref     = 0x10,
+};
 
-#define IRT_BOXES_WITH_ANY(name, bits)                                  \
-  IRT_BOXES(name, bits)                                                 \
-  IRT(Any##name, k##name | kBoxed##name | kPtrTo##name |                \
+constexpr auto kPtrRefBit = static_cast<uint32_t>(Ptr::Ref);
+
+Ptr add_ref(Ptr);
+Ptr remove_ref(Ptr);
+
+///////////////////////////////////////////////////////////////////////////////
+
+#define IRT_BOXES_AND_PTRS(name, bits)                        \
+  IRT(name,              (bits))                              \
+  IRT(Boxed##name,       (bits) << kBoxShift)                 \
+  IRT(PtrTo##name,       (bits) << kPtrShift)                 \
+  IRT(PtrToBoxed##name,  (bits) << kPtrBoxShift)              \
+                                                              \
+  IRTP(PtrToFrame##name,      Frame, (bits) << kPtrShift)     \
+  IRTP(PtrToFrameBoxed##name, Frame, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToStk##name,          Stk, (bits) << kPtrShift)     \
+  IRTP(PtrToStkBoxed##name,     Stk, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToGbl##name,          Gbl, (bits) << kPtrShift)     \
+  IRTP(PtrToGblBoxed##name,     Gbl, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToProp##name,        Prop, (bits) << kPtrShift)     \
+  IRTP(PtrToPropBoxed##name,   Prop, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToArr##name,          Arr, (bits) << kPtrShift)     \
+  IRTP(PtrToArrBoxed##name,     Arr, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToSProp##name,      SProp, (bits) << kPtrShift)     \
+  IRTP(PtrToSPropBoxed##name, SProp, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToMIS##name,          MIS, (bits) << kPtrShift)     \
+  IRTP(PtrToMISBoxed##name,     MIS, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToMemb##name,        Memb, (bits) << kPtrShift)     \
+  IRTP(PtrToMembBoxed##name,   Memb, (bits) << kPtrBoxShift)  \
+  IRTP(PtrToClsInit##name,  ClsInit, (bits) << kPtrShift)     \
+                                                              \
+  IRTP(PtrToRFrame##name,    RFrame, (bits) << kPtrShift)     \
+  IRTP(PtrToRStk##name,        RStk, (bits) << kPtrShift)     \
+  IRTP(PtrToRGbl##name,        RGbl, (bits) << kPtrShift)     \
+  IRTP(PtrToRProp##name,      RProp, (bits) << kPtrShift)     \
+  IRTP(PtrToRArr##name,        RArr, (bits) << kPtrShift)     \
+  IRTP(PtrToRSProp##name,    RSProp, (bits) << kPtrShift)     \
+  IRTP(PtrToRMemb##name,      RMemb, (bits) << kPtrShift)     \
+                                                              \
+  IRTP(PtrToRef##name,          Ref, (bits) << kPtrShift)
+
+#define IRT_WITH_ANY(name, bits)                          \
+  IRT_BOXES_AND_PTRS(name, bits)                          \
+  IRT(Any##name, k##name | kBoxed##name | kPtrTo##name |  \
                  kPtrToBoxed##name)
-
 
 #define IRT_PHP(c)                                                      \
   c(Uninit,       1ULL << 0)                                            \
@@ -84,15 +171,19 @@ namespace constToBits_detail {
   c(CountedArr,   1ULL << 8)                                            \
   c(Obj,          1ULL << 9)                                            \
   c(Res,          1ULL << 10)
-// Boxed*:       11-21
-// PtrTo*:       22-32
-// PtrToBoxed*:  33-43
+// Boxed*:        11-21
+// PtrTo*:        22-32
+// PtrToBoxed*:   33-43
 
-// This list should be in non-decreasing order of specificity
+/*
+ * This list should be in non-decreasing order of specificity.
+ */
 #define IRT_PHP_UNIONS(c)                                               \
   c(Null,          kUninit|kInitNull)                                   \
   c(Str,           kStaticStr|kCountedStr)                              \
   c(Arr,           kStaticArr|kCountedArr)                              \
+  c(NullableObj,   kObj|kInitNull|kUninit)                              \
+  c(Static,        kStaticStr|kStaticArr)                               \
   c(UncountedInit, kInitNull|kBool|kInt|kDbl|kStaticStr|kStaticArr)     \
   c(Uncounted,     kUncountedInit|kUninit)                              \
   c(InitCell,      kUncountedInit|kStr|kArr|kObj|kRes)                  \
@@ -106,592 +197,250 @@ namespace constToBits_detail {
   IRT(Cctx,        1ULL << 48) /* Class* with the lowest bit set,  */   \
                                /* as stored in ActRec.m_cls field  */   \
   IRT(RetAddr,     1ULL << 49) /* Return address */                     \
-  IRT(StkPtr,      1ULL << 50) /* stack pointer */                      \
-  IRT(FramePtr,    1ULL << 51) /* frame pointer */                      \
+  IRT(StkPtr,      1ULL << 50) /* Stack pointer */                      \
+  IRT(FramePtr,    1ULL << 51) /* Frame pointer */                      \
   IRT(TCA,         1ULL << 52)                                          \
-  IRT(ActRec,      1ULL << 53)                                          \
-  IRT(RDSHandle,   1ULL << 54) /* RDS::Handle */                        \
-  IRT(Nullptr,     1ULL << 55)
+  IRT(ABC,         1ULL << 53) /* AsioBlockableChain */                 \
+  IRT(RDSHandle,   1ULL << 54) /* rds::Handle */                        \
+  IRT(Nullptr,     1ULL << 55)                                          \
+  /* bits 58-62 are pointer kind */
 
-// The definitions for these are in ir.cpp
 #define IRT_UNIONS                                                      \
-  IRT(Ctx,         kObj|kCctx)                                          \
-
-// Gen, Counted, PtrToGen, and PtrToCounted are here instead of
-// IRT_PHP_UNIONS because boxing them (e.g., BoxedGen, PtrToBoxedGen)
-// would yield nonsense types.
-#define IRT_SPECIAL                                                 \
-  IRT(Bottom,       0)                                              \
-  IRT(Top,          0xffffffffffffffffULL)                          \
-  IRT(Counted,      kCountedStr|kCountedArr|kObj|kRes|kBoxedCell)   \
-  IRT(PtrToCounted, kCounted << kPtrShift)                          \
-  IRT(Gen,          kCell|kBoxedCell)                               \
-  IRT(StackElem,    kGen|kCls)                                      \
-  IRT(Init,         kGen & ~kUninit)                                \
-  IRT(PtrToGen,     kGen << kPtrShift)                              \
-  IRT(PtrToInit,    kInit << kPtrShift)
-
-// All types (including union types) that represent program values,
-// except Gen (which is special). Boxed*, PtrTo*, and PtrToBoxed* only
-// exist for these types.
-#define IRT_USERLAND(c) IRT_PHP(c) IRT_PHP_UNIONS(c)
-
-// All types with just a single bit set
-#define IRT_PRIMITIVE IRT_PHP(IRT_BOXES) IRT_RUNTIME
-
-// All types
-#define IR_TYPES IRT_USERLAND(IRT_BOXES_WITH_ANY) IRT_RUNTIME IRT_UNIONS \
-  IRT_SPECIAL
+  IRT(Ctx,         kObj|kCctx|kNullptr)
 
 /*
- * Type is used to represent the types of values in the jit. Every Type
+ * Gen, Counted, PtrToGen, and PtrToCounted are here instead of IRT_PHP_UNIONS
+ * because boxing them (e.g., BoxedGen, PtrToBoxedGen) would yield nonsense
+ * types.
+ */
+#define IRT_SPECIAL                                               \
+  IRT(Bottom,       0)                                            \
+  IRT(Top,          0xffffffffffffffffULL)                        \
+  IRT(Counted,      kCountedStr|kCountedArr|kObj|kRes|kBoxedCell) \
+  IRT(PtrToCounted, kCounted << kPtrShift)                        \
+  IRT(Gen,          kCell|kBoxedCell)                             \
+  IRT(StkElem,      kGen|kCls)                                    \
+  IRT(Init,         kGen & ~kUninit)                              \
+  IRT(PtrToGen,     kGen << kPtrShift)                            \
+  IRT(PtrToInit,    kInit << kPtrShift)                           \
+                                                                  \
+  IRTP(PtrToFrameGen,    Frame, kGen << kPtrShift)                \
+  IRTP(PtrToFrameInit,   Frame, kInit << kPtrShift)               \
+  IRTP(PtrToStkGen,        Stk, kGen << kPtrShift)                \
+  IRTP(PtrToStkInit,       Stk, kInit << kPtrShift)               \
+  IRTP(PtrToGblGen,        Gbl, kGen << kPtrShift)                \
+  IRTP(PtrToGblInit,       Gbl, kInit << kPtrShift)               \
+  IRTP(PtrToPropGen,      Prop, kGen << kPtrShift)                \
+  IRTP(PtrToPropInit,     Prop, kInit << kPtrShift)               \
+  IRTP(PtrToArrGen,        Arr, kGen << kPtrShift)                \
+  IRTP(PtrToArrInit,       Arr, kInit << kPtrShift)               \
+  IRTP(PtrToSPropGen,    SProp, kGen << kPtrShift)                \
+  IRTP(PtrToSPropInit,   SProp, kInit << kPtrShift)               \
+  IRTP(PtrToMISGen,        MIS, kGen << kPtrShift)                \
+  IRTP(PtrToMISInit,       MIS, kInit << kPtrShift)               \
+  IRTP(PtrToMembGen,      Memb, kGen << kPtrShift)                \
+  IRTP(PtrToMembInit,     Memb, kInit << kPtrShift)               \
+  IRTP(PtrToClsInitGen,ClsInit, kGen << kPtrShift)                \
+  IRTP(PtrToClsCnsGen,  ClsCns, kGen << kPtrShift)                \
+                                                                  \
+  IRTP(PtrToRFrameGen,  RFrame, kGen << kPtrShift)                \
+  IRTP(PtrToRFrameInit, RFrame, kInit << kPtrShift)               \
+  IRTP(PtrToRStkGen,      RStk, kGen << kPtrShift)                \
+  IRTP(PtrToRStkInit,     RStk, kInit << kPtrShift)               \
+  IRTP(PtrToRGblGen,      RGbl, kGen << kPtrShift)                \
+  IRTP(PtrToRGblInit,     RGbl, kInit << kPtrShift)               \
+  IRTP(PtrToRPropGen,    RProp, kGen << kPtrShift)                \
+  IRTP(PtrToRPropInit,   RProp, kInit << kPtrShift)               \
+  IRTP(PtrToRArrGen,      RArr, kGen << kPtrShift)                \
+  IRTP(PtrToRArrInit,     RArr, kInit << kPtrShift)               \
+  IRTP(PtrToRSPropGen,  RSProp, kGen << kPtrShift)                \
+  IRTP(PtrToRSPropInit, RSProp, kInit << kPtrShift)               \
+  IRTP(PtrToRMISGen,      RMIS, kGen << kPtrShift)                \
+  IRTP(PtrToRMISInit,     RMIS, kInit << kPtrShift)               \
+  IRTP(PtrToRMembGen,     RMemb, kGen << kPtrShift)               \
+  IRTP(PtrToRMembInit,    RMemb, kInit << kPtrShift)              \
+                                                                  \
+  IRTP(PtrToRefGen,        Ref, kGen << kPtrShift)                \
+  IRTP(PtrToRefInit,       Ref, kInit << kPtrShift)
+
+/*
+ * All types with just a single bit set.
+ */
+#define IRT_PRIMITIVE IRT_PHP(IRT_BOXES_AND_PTRS) IRT_RUNTIME
+
+/*
+ * All types.
+ */
+#define IR_TYPES                                \
+  IRT_PHP(IRT_WITH_ANY)                         \
+  IRT_PHP_UNIONS(IRT_WITH_ANY)                  \
+  IRT_RUNTIME                                   \
+  IRT_UNIONS                                    \
+  IRT_SPECIAL
+
+///////////////////////////////////////////////////////////////////////////////
+
+struct ConstCctx {
+  static ConstCctx cctx(const Class* c) {
+    return ConstCctx { reinterpret_cast<uintptr_t>(c) | 0x1 };
+  }
+
+  const Class* cls() const {
+    return reinterpret_cast<const Class*>(m_val & ~0x1);
+  }
+
+  uintptr_t m_val;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Type is used to represent the types of values in the jit.  Every Type
  * represents a set of types, with Type::Top being a superset of all Types and
- * Type::Bottom being a subset of all Types. The elements forming these sets of
- * types come from the types of PHP-visible values (Str, Obj, Int, ...) and
- * runtime-internal types (Func, TCA, ActRec, ...).
+ * Type::Bottom being a subset of all Types.  The elements forming these sets
+ * of types come from the types of PHP-visible values (Str, Obj, Int, ...) and
+ * runtime-internal types (Func, TCA, ...).
  *
  * Types can be constructed from the predefined constants or by composing
- * existing Types in various ways. Unions, intersections, and subtractions are
+ * existing Types in various ways.  Unions, intersections, and subtractions are
  * all supported, though for implementation-specific reasons certain
- * combinations of specialized types cannot be represented. A type is
+ * combinations of specialized types cannot be represented.  A type is
  * considered specialized if it refers to a specific Class or a
- * ArrayData::ArrayKind. As an example, if A and B are unrelated Classes,
- * Obj<A> | Obj<B> is impossible to represent. However, if B is a subclass of
+ * ArrayData::ArrayKind.  As an example, if A and B are unrelated Classes,
+ * Obj<A> | Obj<B> is impossible to represent.  However, if B is a subclass of
  * A, Obj<A> | Obj<B> == Obj<B>, which can be represented as a Type.
  */
-class Type {
-  typedef uint64_t bits_t;
-
-  static const size_t kBoxShift = 11;
-  static const size_t kPtrShift = kBoxShift * 2;
-  static const size_t kPtrBoxShift = kBoxShift + kPtrShift;
-
-  enum TypedBits {
-#define IRT(name, bits) k##name = (bits),
+struct Type {
+  /*
+   * Predefined constants for all primitive types and many common unions.
+   */
+#define IRT(name, ...) static const Type name;
+#define IRTP(name, ...) IRT(name)
   IR_TYPES
 #undef IRT
+#undef IRTP
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Type tags.
+
+private:
+  using bits_t = uint64_t;
+
+  static constexpr size_t kBoxShift     = 11;
+  static constexpr size_t kPtrShift     = kBoxShift + kBoxShift;
+  static constexpr size_t kPtrBoxShift  = kBoxShift + kPtrShift;
+
+  enum TypedBits {
+#define IRT(name, bits)       k##name = (bits),
+#define IRTP(name, ptr, bits) k##name = (bits),
+    IR_TYPES
+#undef IRT
+#undef IRTP
   };
 
-  bits_t m_bits:63;
-  bool m_hasConstVal:1;
 
-  union {
-    uintptr_t m_extra;
-
-    // Constant values. Validity determined by m_hasConstVal and m_bits.
-    bool m_boolVal;
-    int64_t m_intVal;
-    double m_dblVal;
-    const StringData* m_strVal;
-    const ArrayData* m_arrVal;
-    const HPHP::Func* m_funcVal;
-    const Class* m_clsVal;
-    JIT::TCA m_tcaVal;
-    RDS::Handle m_rdsHandleVal;
-    TypedValue* m_ptrVal;
-
-    // Specialization for object classes and array kinds.
-    const Class* m_class;
-    struct {
-      bool m_arrayKindValid;
-      ArrayData::ArrayKind m_arrayKind;
-      uint64_t m_padding:48; // We want all 8 bytes of m_extra to be defined.
-    };
-  };
-
-  bool checkValid() const;
-
-  explicit Type(bits_t bits, uintptr_t extra = 0)
-    : m_bits(bits)
-    , m_hasConstVal(false)
-    , m_extra(extra)
-  {
-    assert(checkValid());
-  }
-
-  explicit Type(bits_t bits, const Class* klass)
-    : m_bits(bits)
-    , m_hasConstVal(false)
-    , m_class(klass)
-  {
-    assert(checkValid());
-  }
-
-  explicit Type(bits_t bits, ArrayData::ArrayKind arrayKind)
-    : m_bits(bits)
-    , m_hasConstVal(false)
-    , m_arrayKindValid(true)
-    , m_arrayKind(arrayKind)
-    , m_padding(0)
-  {
-    assert(checkValid());
-  }
-
-  static bits_t bitsFromDataType(DataType outer, DataType inner);
-
-  // combine, Union, and Intersect are used for operator| and operator&. See
-  // .cpp for details.
-  template<typename Oper>
-  static Type combine(bits_t newBits, Type a, Type b);
-
-  struct Union;
-  struct Intersect;
+  /////////////////////////////////////////////////////////////////////////////
+  // Basic methods.
 
 public:
-# define IRT(name, ...) static const Type name;
-  IR_TYPES
-# undef IRT
+  /*
+   * Default bottom constructor.
+   */
+  Type();
 
-  Type()
-    : m_bits(kBottom)
-    , m_hasConstVal(false)
-    , m_extra(0)
-  {}
+  /*
+   * Assignment.
+   */
+  Type& operator=(Type b);
 
-  explicit Type(DataType outerType, DataType innerType = KindOfInvalid)
-    : m_bits(bitsFromDataType(outerType, innerType))
-    , m_hasConstVal(false)
-    , m_extra(0)
-  {}
+  /*
+   * Hash the Type as a bitfield.
+   */
+  size_t hash() const;
 
-  explicit Type(const RuntimeType& rtt);
-  explicit Type(const DynLocation* dl);
-
-  size_t hash() const {
-    return hash_int64_pair(m_bits | (bits_t(m_hasConstVal) << 63), m_extra);
-  }
-
-  Type& operator=(Type b) {
-    m_bits = b.m_bits;
-    m_hasConstVal = b.m_hasConstVal;
-    m_extra = b.m_extra;
-    return *this;
-  }
-
-  std::string constValString() const;
+  /*
+   * Stringify the Type.
+   *
+   * constValString: @requires: hasConstVal() ||
+   *                            subtypeOfAny(Uninit, InitNull, Nullptr)
+   */
   std::string toString() const;
+  std::string constValString() const;
   static std::string debugString(Type t);
-  static Type fromString(const std::string& str);
 
-  ////////// Support for constants //////////
 
- private:
-  // forConst returns the Type to use for a given C++ value. The only
-  // interesting case is int/bool disambiguation.  Enums are treated as ints.
-  template<class T>
-  static typename std::enable_if<
-    std::is_integral<T>::value || std::is_enum<T>::value,
-    Type
-    >::type forConst(T) {
-    return std::is_same<T,bool>::value ? Type::Bool : Type::Int;
-  }
-  static Type forConst(const HPHP::Func*)        { return Func; }
-  static Type forConst(const Class*)             { return Cls; }
-  static Type forConst(JIT::TCA)                 { return TCA; }
-  static Type forConst(double)                   { return Dbl; }
-  static Type forConst(const StringData* sd) {
-    assert(sd->isStatic());
-    return StaticStr;
-  }
-  static Type forConst(const ArrayData* ad) {
-    assert(ad->isStatic());
-    return StaticArr.specialize(ad->kind());
-  }
-
- public:
-  // Returns true iff this Type represents a known value.
-  bool isConst() const {
-    return m_hasConstVal || subtypeOfAny(Uninit, InitNull, Nullptr);
-  }
-
-  // Returns true iff this Type is a constant value of type t.
-  bool isConst(Type t) const {
-    return subtypeOf(t) && isConst();
-  }
-
-  // Returns true iff this Type represents the constant val, using the same C++
-  // type -> Type mapping as Type::cns().
-  template<typename T>
-  bool isConst(T val) const {
-    return subtypeOf(cns(val));
-  }
-
-  template<typename T>
-  static Type cns(T val, Type ret) {
-    assert(!ret.m_hasConstVal);
-    ret.m_hasConstVal = true;
-
-    static_assert(sizeof(T) <= sizeof ret,
-                  "Constant data was larger than supported");
-    static_assert(std::is_pod<T>::value,
-                  "Constant data wasn't a pod");
-    const auto toCopy = constToBits_detail::promoteIfNeeded(val);
-    static_assert(sizeof toCopy == 8,
-                  "Unexpected size for toCopy");
-    std::memcpy(&ret.m_extra, &toCopy, sizeof toCopy);
-    return ret;
-  }
-
-  template<typename T>
-  static Type cns(T val) {
-    return cns(val, forConst(val));
-  }
-
-  static Type cns(std::nullptr_t) {
-    return Type::Nullptr;
-  }
-
-  static Type cns(const TypedValue tv) {
-    auto ret = [&] {
-      switch (tv.m_type) {
-        case KindOfClass:
-        case KindOfUninit:
-        case KindOfNull:
-        case KindOfBoolean:
-        case KindOfInt64:
-        case KindOfDouble:
-        case KindOfStaticString:
-          return Type(tv.m_type);
-
-        case KindOfString:
-          return forConst(tv.m_data.pstr);
-
-        case KindOfArray:
-          return forConst(tv.m_data.parr);
-
-        default:
-          always_assert(false && "Invalid KindOf for constant TypedValue");
-      }
-    }();
-    ret.m_hasConstVal = true;
-    ret.m_extra = tv.m_data.num;
-    return ret;
-  }
-
-  // If this represents a constant value, return the most specific strict
-  // supertype of this we can represent. In most cases this just erases the
-  // constant value: Int<4> -> Int, Dbl<2.5> -> Dbl. Arrays are special since
-  // they can be both constant and specialized, so keep the array's kind in the
-  // resulting type.
-  Type dropConstVal() const {
-    if (!m_hasConstVal) return *this;
-    assert(!isUnion());
-
-    if (subtypeOf(StaticArr)) {
-      return Type::StaticArr.specialize(arrVal()->kind());
-    }
-    return Type(m_bits);
-  }
-
-  bool hasRawVal() const {
-    return m_hasConstVal;
-  }
-
-  uint64_t rawVal() const {
-    assert(m_hasConstVal);
-    return m_intVal;
-  }
-
-  bool boolVal() const {
-    assert(subtypeOf(Bool) && m_hasConstVal);
-    assert(m_boolVal <= 1);
-    return m_boolVal;
-  }
-
-  int64_t intVal() const {
-    assert(subtypeOf(Int) && m_hasConstVal);
-    return m_intVal;
-  }
-
-  double dblVal() const {
-    assert(subtypeOf(Dbl) && m_hasConstVal);
-    return m_dblVal;
-  }
-
-  const StringData* strVal() const {
-    assert(subtypeOf(StaticStr) && m_hasConstVal);
-    return m_strVal;
-  }
-
-  const ArrayData* arrVal() const {
-    assert(subtypeOf(StaticArr) && m_hasConstVal);
-    return m_arrVal;
-  }
-
-  const HPHP::Func* funcVal() const {
-    assert(subtypeOf(Func) && m_hasConstVal);
-    return m_funcVal;
-  }
-
-  const Class* clsVal() const {
-    assert(subtypeOf(Cls) && m_hasConstVal);
-    return m_clsVal;
-  }
-
-  RDS::Handle rdsHandleVal() const {
-    assert(subtypeOf(RDSHandle) && m_hasConstVal);
-    return m_rdsHandleVal;
-  }
-
-  JIT::TCA tcaVal() const {
-    assert(subtypeOf(TCA) && m_hasConstVal);
-    return m_tcaVal;
-  }
-
-  ////////// Methods to query properties of the type //////////
-
-  bool isBoxed() const {
-    return subtypeOf(BoxedCell);
-  }
-
-  bool notBoxed() const {
-    assert(subtypeOf(Gen));
-    return subtypeOf(Cell);
-  }
-
-  bool maybeBoxed() const {
-    return maybe(BoxedCell);
-  }
-
-  bool isPtr() const {
-    return subtypeOf(PtrToGen);
-  }
-
-  bool notPtr() const {
-    return not(PtrToGen);
-  }
-
-  bool isCounted() const {
-    return subtypeOf(Counted);
-  }
-
-  bool maybeCounted() const {
-    return maybe(Counted);
-  }
-
-  bool notCounted() const {
-    return not(Counted);
-  }
+  /////////////////////////////////////////////////////////////////////////////
+  // DataType.
 
   /*
-   * Returns true iff this is a union type. Note that this is the plain old set
-   * definition of union, so Type::Str, Type::Arr, and Type::Null will all
-   * return true.
+   * Construct from a DataType.
    */
-  bool isUnion() const {
-    // This will return true iff more than 1 bit is set in m_bits.
-    return (m_bits & (m_bits - 1)) != 0;
-  }
+  explicit Type(DataType outer, DataType inner = KindOfUninit);
+  explicit Type(DataType outer, KindOfAny);
 
   /*
-   * Returns true if this value has a known constant DataType enum value.  If
-   * the type is exactly Type::Str or Type::Null it returns true anyway, even
-   * though it could be either KindOfStaticString or KindOfString, or
-   * KindOfUninit or KindOfNull, respectively.
+   * Return true iff there exists a DataType in the range [KindOfUninit,
+   * KindOfRef] that represents a non-strict supertype of this type.
    *
-   * TODO(#3390819): this function should return false for Str and Null.
+   * @requires: *this <= StkElem
+   */
+  bool isKnownDataType() const;
+
+  /*
+   * Return the most specific DataType that is a supertype of this Type.
    *
-   * Pre: subtypeOf(StackElem)
+   * @requires: isKnownDataType()
    */
-  bool isKnownDataType() const {
-    assert(subtypeOf(StackElem));
+  DataType toDataType() const;
 
-    // Some unions that correspond to single KindOfs.  And Type::Str
-    // and Type::Null for now for historical reasons.
-    if (subtypeOfAny(Str, Arr, Null, BoxedCell)) {
-      return true;
-    }
 
-    return !isUnion();
-  }
+  /////////////////////////////////////////////////////////////////////////////
+  // Comparisons.                                                       [const]
 
   /*
-   * Similar to isKnownDataType, with the added restriction that the type not
-   * be Boxed.
+   * Return true if this is exactly equal to `rhs'.
+   *
+   * Be careful---you probably mean `<='.
    */
-  bool isKnownUnboxedDataType() const {
-    return isKnownDataType() && notBoxed();
-  }
+  bool operator==(Type rhs) const;
+  bool operator!=(Type rhs) const;
 
   /*
-   * Returns true if this requires a register to hold a DataType at runtime.
+   * Does this represent a subset (or superset) of `t2'?
+   *
+   * All operators are implemented in terms of operator==() and operator<=().
    */
-  bool needsReg() const {
-    return subtypeOf(StackElem) && !isKnownDataType();
-  }
-
-  bool needsValueReg() const {
-    return !subtypeOfAny(Uninit, InitNull, Nullptr);
-  }
-
-  bool needsStaticBitCheck() const {
-    return maybe(StaticStr | StaticArr);
-  }
-
-  bool canRunDtor() const {
-    return maybe(CountedArr | BoxedCountedArr | Obj | BoxedObj |
-                 Res | BoxedRes);
-  }
-
-  // return true if this corresponds to a type that is passed by value in C++
-  bool isSimpleType() const {
-    return subtypeOfAny(Bool, Int, Dbl, Null);
-  }
-
-  // return true if this corresponds to a type that is passed by reference in
-  // C++
-  bool isReferenceType() const {
-    return subtypeOfAny(Str, Arr, Obj, Res);
-  }
-
-  int nativeSize() const {
-    if (subtypeOf(Type::Int | Type::Func)) return sz::qword;
-    if (subtypeOf(Type::Bool))             return sz::byte;
-    not_implemented();
-  }
-
-  ////////// Support for specialized types: Obj classes and Arr kinds //////////
+  bool operator<=(Type rhs) const;
+  bool operator>=(Type rhs) const;
+  bool operator<(Type rhs) const;
+  bool operator>(Type rhs) const;
 
   /*
-   * True if type can have a specialized class.
+   * Is this a non-strict subtype of any among a variadic list of Types?
    */
-  bool canSpecializeClass() const {
-    return (m_bits & kAnyObj) && !(m_bits & kAnyArr);
-  }
-
-  /*
-   * True if type can have a specialized array kind.
-   */
-  bool canSpecializeArrayKind() const {
-    return (m_bits & kAnyArr) && !(m_bits & kAnyObj);
-  }
-
-  bool canSpecializeAny() const {
-    return canSpecializeClass() || canSpecializeArrayKind();
-  }
-
-  Type specialize(const Class* klass) const {
-    assert(canSpecializeClass() && m_class == nullptr);
-    return Type(m_bits, klass);
-  }
-
-  Type specialize(ArrayData::ArrayKind arrayKind) const {
-    assert(canSpecializeArrayKind());
-    return Type(m_bits, arrayKind);
-  }
-
-  bool isSpecialized() const {
-    return (canSpecializeClass() && getClass()) ||
-      (canSpecializeArrayKind() && hasArrayKind());
-  }
-
-  Type unspecialize() const {
-    return Type(m_bits);
-  }
-
-  const Class* getClass() const {
-    assert(canSpecializeClass());
-    return m_class;
-  }
-
-  bool hasArrayKind() const {
-    assert(canSpecializeArrayKind());
-    return m_hasConstVal || m_arrayKindValid;
-  }
-
-  ArrayData::ArrayKind getArrayKind() const {
-    assert(hasArrayKind());
-    return m_hasConstVal ? m_arrVal->kind() : m_arrayKind;
-  }
-
-  // Returns a subset of *this containing only the members relating to its
-  // specialization.
-  //
-  // {Int|Str|Obj<C>|BoxedObj<C>}.specializedType() == {Obj<C>|BoxedObj<C>}
-  Type specializedType() const {
-    assert(isSpecialized());
-    if (canSpecializeClass()) return *this & AnyObj;
-    if (canSpecializeArrayKind()) return *this & AnyArr;
-    not_reached();
-  }
-
-  ////////// Methods for comparing types //////////
-
-  /*
-   * Returns true iff this represents a non-strict subset of t2.
-   */
-  bool subtypeOf(Type t2) const {
-    // First, check for any members in m_bits that aren't in t2.m_bits.
-    if ((m_bits & t2.m_bits) != m_bits) return false;
-
-    // If t2 is a constant, we must be the same constant or Bottom.
-    if (t2.m_hasConstVal) {
-      assert(!t2.isUnion());
-      return m_bits == kBottom || (m_hasConstVal && m_extra == t2.m_extra);
-    }
-
-    // If t2 is specialized, we must either not be eligible for the same kind
-    // of specialization (Int <= {Int|Arr<Packed>}) or have a specialization
-    // that is a subtype of t2's specialization.
-    if (t2.isSpecialized()) {
-      if (t2.canSpecializeClass()) {
-        return !canSpecializeClass() ||
-          (m_class != nullptr && m_class->classof(t2.m_class));
-      }
-
-      return !canSpecializeArrayKind() ||
-        (m_arrayKindValid && getArrayKind() == t2.getArrayKind());
-    }
-
-    return true;
-  }
-
   template<typename... Types>
-  bool subtypeOfAny(Type t2, Types... ts) const {
-    return subtypeOf(t2) || subtypeOfAny(ts...);
-  }
-
-  bool subtypeOfAny() const {
-    return false;
-  }
+  bool subtypeOfAny(Type t2, Types... ts) const;
+  bool subtypeOfAny() const;
 
   /*
-   * Returns true if this is a strict subtype of t2.
+   * Return true if this has nontrivial intersection with `t2'.
    */
-  bool strictSubtypeOf(Type t2) const {
-    return *this != t2 && subtypeOf(t2);
-  }
+  bool maybe(Type t2) const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Combinators.
 
   /*
-   * Returns true if any subtype of this is a subtype of t2.
-   */
-  bool maybe(Type t2) const {
-    return (*this & t2) != Bottom;
-  }
-
-  /*
-   * Returns true if no subtypes of this are subtypes of t2.
-   */
-  bool not(Type t2) const {
-    return !maybe(t2);
-  }
-
-  /*
-   * Returns true if this is exactly equal to t2. Be careful: you
-   * probably mean subtypeOf.
-   */
-  bool equals(Type t2) const {
-    return m_bits == t2.m_bits && m_hasConstVal == t2.m_hasConstVal &&
-      m_extra == t2.m_extra;
-  }
-
-  bool operator==(Type t2) const { return equals(t2); }
-  bool operator!=(Type t2) const { return !operator==(t2); }
-
-  ////////// Methods for combining Types in various ways //////////
-
-  /*
-   * Standard set operations: union, intersection, and difference.
+   * Set operations: union, intersection, and difference.
+   *
+   * These operations may all return larger types than the "true" union,
+   * intersection, or difference.  (They must be conservative in that direction
+   * for types that are too hard for us to represent, or we could generate
+   * incorrect code by assuming certain possible values are impossible.)
+   *
+   * Note: operator| and operator& guarantee commutativity.
    */
   Type operator|(Type other) const;
   Type& operator|=(Type other) { return *this = *this | other; }
@@ -702,153 +451,372 @@ public:
   Type operator-(Type other) const;
   Type& operator-=(Type other) { return *this = *this - other; }
 
-  /*
-   * unionOf: return the least common predefined supertype of t1 and t2,
-   * i.e.. the most refined type t3 such that t1 <= t3 and t2 <= t3. Note that
-   * arbitrary union types are possible using operator| but this function
-   * always returns one of the predefined types.
-   */
-  static Type unionOf(Type t1, Type t2);
 
-  ////////// Support for inner types of boxed and pointer types //////////
-
-  Type box() const {
-    assert(subtypeOf(Cell));
-    // Boxing Uninit returns InitNull but that logic doesn't belong
-    // here.
-    assert(not(Uninit) || equals(Cell));
-    return Type(m_bits << kBoxShift,
-                isSpecialized() && !m_hasConstVal ? m_extra : 0);
-  }
-
-  // This computes the type effects of the Unbox opcode.
-  Type unbox() const {
-    assert(subtypeOf(Gen));
-    return (*this & Cell) | (*this & BoxedCell).innerType();
-  }
-
-  Type innerType() const {
-    assert(isBoxed() || equals(Bottom));
-    return Type(m_bits >> kBoxShift, m_extra);
-  }
-
-  Type deref() const {
-    assert(isPtr());
-    return Type(m_bits >> kPtrShift, isSpecialized() ? m_extra : 0);
-  }
-
-  Type derefIfPtr() const {
-    assert(subtypeOf(Gen | PtrToGen));
-    return isPtr() ? deref() : *this;
-  }
-
-  // Returns the "stripped" version of this: dereferenced and unboxed,
-  // if applicable.
-  Type strip() const {
-    return derefIfPtr().unbox();
-  }
-
-  Type ptr() const {
-    assert(!isPtr());
-    assert(subtypeOf(Gen));
-    return Type(m_bits << kPtrShift,
-                isSpecialized() && !m_hasConstVal ? m_extra : 0);
-  }
-
-  ////////// Methods for talking to other type systems in the VM //////////
+  /////////////////////////////////////////////////////////////////////////////
+  // Is-a methods.                                                      [const]
 
   /*
-   * TODO(#3390819): this function does not exactly convert this type into a
-   * DataType in cases where a type does not exactly map to a DataType.  For
-   * example, Null.toDataType() returns KindOfNull, even though it could be
-   * KindOfUninit.
+   * Is this a union type?
    *
-   * Try not to use this function in new code.
+   * Note that this is the plain old set definition of union, so Type::Str,
+   * Type::Arr, and Type::Null will all return true.
    */
-  DataType toDataType() const;
+  bool isUnion() const;
 
-  RuntimeType toRuntimeType() const;
+  /*
+   * Does this require a register to hold a DataType or value at runtime?
+   */
+  bool needsReg() const;
+  bool needsValueReg() const;
+
+  /*
+   * Return true if this corresponds to a type that is passed by (value/
+   * reference) in C++.
+   */
+  bool isSimpleType() const;
+  bool isReferenceType() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Constant type creation.                                     [const/static]
+
+  /*
+   * Return a const copy of `ret' with constant value `val'.
+   */
+  template<typename T>
+  static Type cns(T val, Type ret);
+
+  /*
+   * Return a const type corresponding to `val'.
+   *
+   * @returns: cns(val, forConst(val))
+   */
+  template<typename T>
+  static Type cns(T val);
+
+  /*
+   * @returns: Type::Nullptr
+   */
+  static Type cns(std::nullptr_t);
+
+  /*
+   * Return a const type for `tv'.
+   */
+  static Type cns(const TypedValue& tv);
+
+  /*
+   * If this represents a constant value, return the most specific strict
+   * supertype of this we can represent, else return *this.
+   *
+   * In most cases this just erases the constant value:
+   *    Int<4> -> Int
+   *    Dbl<2.5> -> Dbl
+   *
+   * Arrays are special since they can be both constant and specialized, so
+   * keep the array's kind in the resulting type.
+   */
+  Type dropConstVal() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Constant introspection.                                            [const]
+
+  /*
+   * Does this Type have a constant value? If true, we can call xxVal().
+   *
+   * Note: Bottom is a type with no value, and Uninit/InitNull/Nullptr are
+   * considered types with a single unique value, so this function returns false
+   * for those types. You may want to explicitly check for them as needed.
+   *
+   */
+  bool hasConstVal() const;
+
+  /*
+   * @return hasConstVal() && *this <= t.
+   */
+  bool hasConstVal(Type t) const;
+
+  /*
+   * Does this Type represent the constant val `val'?
+   *
+   * @returns: hasConstVal(cns(val))
+   */
+  template<typename T>
+  bool hasConstVal(T val) const;
+
+  /*
+   * Return the const value for a const Type as a uint64_t.
+   *
+   * @requires: hasConstVal()
+   */
+  uint64_t rawVal() const;
+
+  /*
+   * Return the const value for a const Type.
+   *
+   * @requires: hasConstVal(Type::T)
+   */
+  bool boolVal() const;
+  int64_t intVal() const;
+  double dblVal() const;
+  const StringData* strVal() const;
+  const ArrayData* arrVal() const;
+  const HPHP::Func* funcVal() const;
+  const Class* clsVal() const;
+  ConstCctx cctxVal() const;
+  rds::Handle rdsHandleVal() const;
+  jit::TCA tcaVal() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Specialized type creation.                                  [const/static]
+
+  /*
+   * Return a specialized Type::Arr.
+   */
+  static Type Array(ArrayData::ArrayKind kind);
+  static Type Array(const RepoAuthType::Array* rat);
+  static Type Array(const Shape* shape);
+
+  /*
+   * Return a specialized Type::StaticArr.
+   */
+  static Type StaticArray(ArrayData::ArrayKind kind);
+  static Type StaticArray(const RepoAuthType::Array* rat);
+  static Type StaticArray(const Shape* shape);
+
+  /*
+   * Return a specialized Type::Obj.
+   */
+  static Type SubObj(const Class* cls);
+  static Type ExactObj(const Class* cls);
+
+  /*
+   * Return a copy of this Type with the specialization dropped.
+   *
+   * @returns: Type(m_bits)
+   */
+  Type unspecialize() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Specialization introspection.                                      [const]
+
+  /*
+   * Does this Type have a specialization?
+   */
+  bool isSpecialized() const;
+
+  /*
+   * Whether this type can meaningfully specialize along `kind'.
+   *
+   * For example, a Type only supports SpecKind::Class if its bits intersect
+   * nontrivially with kAnyObj.
+   */
+  bool supports(SpecKind kind) const;
+
+  /*
+   * Return the corresponding type specialization.
+   *
+   * If the Type is able to support the specialization (i.e., supports()
+   * returns true for the corresponding SpecKind), but no specialization is
+   * present, Spec::Top will be returned.
+   *
+   * If supports() would return false for the corresponding SpecKind,
+   * Spec::Bottom is returned.
+   *
+   * The Spec objects cast (explicitly) to true iff they are neither Spec::Top
+   * nor Spec::Bottom, so these functions also answer the question, "Is this
+   * Type nontrivially specialized along the respective kind?"
+   */
+  ArraySpec arrSpec() const;
+  ClassSpec clsSpec() const;
+
+  /*
+   * Return a discriminated TypeSpec for this Type's specialization.
+   */
+  TypeSpec spec() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Inner types.                                                       [const]
+
+  /*
+   * Box or unbox a Type.
+   *
+   * The box() and inner() methods are inverses---they (respectively) take the
+   * the {Cell, BoxedCell} bits of the Type and coerce them into the
+   * {BoxedCell, Cell} sides of the lattice, replacing whatever was there
+   * before; e.g.,
+   *
+   *    box(Int|BoxedDbl)   -> BoxedInt
+   *    inner(BoxedInt|Dbl) -> Int
+   *
+   * Meanwhile, unbox() is like inner(), but rather than replacing the Cell
+   * component of the Type, it unions it with the shifted BoxedCell bits, e.g.,
+   *
+   *    unbox(BoxedInt|Dbl) -> Int|Dbl
+   *
+   * @requires:
+   *    box:    *this <= Cell
+   *            !maybe(Uninit) || *this == Cell
+   *    inner:  *this <= BoxedCell
+   *    unbox:  *this <= Gen
+   */
+  Type box() const;
+  Type inner() const;
+  Type unbox() const;
+
+  /*
+   * Get a pointer to, or dereference, a Type.
+   *
+   * @requires:
+   *    ptr:        *this <= Gen
+   *    deref:      *this <= PtrToGen
+   *    derefIfPtr: *this <= (Gen | PtrToGen)
+   */
+  Type ptr(Ptr kind) const;
+  Type deref() const;
+  Type derefIfPtr() const;
+
+  /*
+   * Return a Type stripped of boxing and pointerness.
+   */
+  Type strip() const;
+
+  /*
+   * Return the pointer category of a Type.
+   */
+  Ptr ptrKind() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Internal methods.
+
+private:
+  /*
+   * Internal constructors.
+   */
+  Type(bits_t bits, Ptr kind, uintptr_t extra = 0);
+  Type(Type t, ArraySpec arraySpec);
+  Type(Type t, ClassSpec classSpec);
+
+  /*
+   * Bit-pack an `outer' and an `inner' DataType for a Type.
+   */
+  static bits_t bitsFromDataType(DataType outer, DataType inner);
+
+  /*
+   * Return false if a specialized type has a mismatching tag, else true.
+   */
+  bool checkValid() const;
+
+  /*
+   * Add specialization to a generic type via a TypeSpec.
+   *
+   * Used as the finalization step for union and intersect.  The `killable'
+   * bits are the components of the Type which can be killed by components of
+   * `spec' that are Bottom.
+   */
+  Type specialize(TypeSpec spec, bits_t killable = kTop) const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Data members.
+
+private:
+  union {
+    struct {
+      bits_t m_bits : 58;
+      bits_t m_ptrKind : 5;
+      bool m_hasConstVal : 1;
+    };
+    uint64_t m_rawInt;
+  };
+
+  union {
+    uintptr_t m_extra;
+
+    // Constant values.  Validity determined by m_hasConstVal and m_bits.
+    bool m_boolVal;
+    int64_t m_intVal;
+    double m_dblVal;
+    const StringData* m_strVal;
+    const ArrayData* m_arrVal;
+    const HPHP::Func* m_funcVal;
+    const Class* m_clsVal;
+    ConstCctx m_cctxVal;
+    jit::TCA m_tcaVal;
+    rds::Handle m_rdsHandleVal;
+    TypedValue* m_ptrVal;
+
+    // Specializations for object classes and arrays.
+    ClassSpec m_clsSpec;
+    ArraySpec m_arrSpec;
+  };
 };
 
 typedef folly::Optional<Type> OptType;
 
-inline bool operator<(Type a, Type b) { return a.strictSubtypeOf(b); }
-inline bool operator>(Type a, Type b) { return b.strictSubtypeOf(a); }
-inline bool operator<=(Type a, Type b) { return a.subtypeOf(b); }
-inline bool operator>=(Type a, Type b) { return b.subtypeOf(a); }
-
 /*
- * JIT::Type must be small enough for efficient pass-by-value.
+ * jit::Type must be small enough for efficient pass-by-value.
  */
 static_assert(sizeof(Type) <= 2 * sizeof(uint64_t),
-              "JIT::Type should fit in (2 * sizeof(uint64_t))");
+              "jit::Type should fit in (2 * sizeof(uint64_t))");
+
+
+/////////////////////////////////////////////////////////////////////////////
 
 /*
- * Return the most refined type that can be used to represent the type
- * in a live TypedValue.
+ * Return the most refined Type that can be used to represent the type of a
+ * live TypedValue or a RepoAuthType.
  */
-Type liveTVType(const TypedValue* tv);
+Type typeFromTV(const TypedValue* tv);
+Type typeFromRAT(RepoAuthType ty);
+
+
+///////////////////////////////////////////////////////////////////////////////
 
 /*
- * Return the boxed version of the input type, taking into account php
+ * Return the boxed version of the input type, taking into account PHP
  * semantics and subtle implementation details.
  */
 Type boxType(Type);
 
 /*
- * Create a Type from a RepoAuthType.
+ * Return the dest type for a LdRef with the given typeParam.
+ *
+ * @requires: typeParam <= Type::Cell
  */
-Type convertToType(RepoAuthType ty);
+Type ldRefReturn(Type typeParam);
 
-//////////////////////////////////////////////////////////////////////
+/*
+ * Returns the type that a value may have if it had type `srcType' and failed a
+ * CheckType with `typeParam'.  Not all typeParams for CheckTypes are precise,
+ * so the return value may even be `srcType' itself in some situations.
+ */
+Type negativeCheckType(Type typeParam, Type srcType);
 
-struct TypeConstraint {
-  /* implicit */ TypeConstraint(DataTypeCategory cat = DataTypeGeneric,
-                                Type aType = Type::Gen,
-                                DataTypeCategory inner = DataTypeGeneric)
-    : category(cat)
-    , innerCat(inner)
-    , weak(false)
-    , assertedType(aType)
-  {}
+///////////////////////////////////////////////////////////////////////////////
 
-  std::string toString() const;
-
-  TypeConstraint& setWeak(bool w = true) {
-    weak = w;
-    return *this;
-  }
-
-  // category starts as DataTypeGeneric and is refined to more specific values
-  // by consumers of the type.
-  DataTypeCategory category;
-
-  // When a value is boxed, innerCat is used to determine how we can relax the
-  // inner type.
-  DataTypeCategory innerCat;
-
-  // If weak is true, the consumer of the value being constrained doesn't
-  // actually want to constrain the guard (if found). Most often used to figure
-  // out if a type can be used without further constraining guards.
-  bool weak;
-
-  // It's fairly common to emit an AssertType op with a type that is less
-  // specific than the current guard type, but more specific than the type the
-  // guard will eventually be relaxed to. We want to simplify these
-  // instructions away, and when we do, we remember their type in assertedType.
-  Type assertedType;
+/*
+ * Abbreviated namespace for predefined types.
+ *
+ * Used for macro codegen for types declared in ir.specification.
+ */
+namespace TypeNames {
+#define IRT(name, ...) UNUSED extern const Type name;
+#define IRTP(name, ...) IRT(name)
+  IR_TYPES
+#undef IRT
+#undef IRTP
 };
 
-const int kTypeWordOffset = offsetof(TypedValue, m_type) % 8;
-const int kTypeShiftBits = kTypeWordOffset * CHAR_BIT;
-
-// left shift an immediate DataType, for type, to the correct position
-// within one of the registers used to pass a TypedValue by value.
-inline uint64_t toDataTypeForCall(Type type) {
-  return uint64_t(type.toDataType()) << kTypeShiftBits;
-}
-
-
+///////////////////////////////////////////////////////////////////////////////
 }}
+
+#define incl_HPHP_JIT_TYPE_INL_H_
+#include "hphp/runtime/vm/jit/type-inl.h"
+#undef incl_HPHP_JIT_TYPE_INL_H_
 
 #endif

@@ -18,11 +18,11 @@
 #ifndef incl_HPHP_EXT_IMAGICK_CONSTANTS_H_
 #define incl_HPHP_EXT_IMAGICK_CONSTANTS_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 
-enum IMAGCIK_COLOR {
+enum IMAGICK_COLOR {
   IMAGICK_COLOR_BLACK = 0,
   IMAGICK_COLOR_BLUE,
   IMAGICK_COLOR_CYAN,

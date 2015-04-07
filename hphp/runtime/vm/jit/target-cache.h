@@ -29,7 +29,7 @@ struct Class;
 struct NamedEntity;
 }
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -45,8 +45,8 @@ struct FuncCache {
     const Func*  m_value;
   };
 
-  static RDS::Handle alloc();
-  static const Func* lookup(RDS::Handle, StringData* lookup);
+  static rds::Handle alloc();
+  static const Func* lookup(rds::Handle, StringData* lookup);
 
   Pair m_pairs[kNumLines];
 };
@@ -72,8 +72,8 @@ struct ClassCache {
     const Class* m_value;
   };
 
-  static RDS::Handle alloc();
-  static const Class* lookup(RDS::Handle, StringData* lookup);
+  static rds::Handle alloc();
+  static const Class* lookup(rds::Handle, StringData* lookup);
 
   Pair m_pairs[kNumLines];
 };
@@ -84,10 +84,10 @@ struct StaticMethodCache {
   const Func* m_func;
   const Class* m_cls;
 
-  static RDS::Handle alloc(const StringData* cls,
+  static rds::Handle alloc(const StringData* cls,
                       const StringData* meth,
                       const char* ctxName);
-  static const Func* lookup(RDS::Handle chand,
+  static const Func* lookup(rds::Handle chand,
                             const NamedEntity* ne, const StringData* cls,
                             const StringData* meth, TypedValue* vmfp);
 };
@@ -96,37 +96,19 @@ struct StaticMethodFCache {
   const Func* m_func;
   int m_static;
 
-  static RDS::Handle alloc(const StringData* cls,
+  static rds::Handle alloc(const StringData* cls,
                       const StringData* meth,
                       const char* ctxName);
-  static const Func* lookup(RDS::Handle chand, const Class* cls,
+  static const Func* lookup(rds::Handle chand, const Class* cls,
                             const StringData* meth, TypedValue* vmfp);
 };
 
 //////////////////////////////////////////////////////////////////////
 
-/*
- * Static properties.
- *
- * We only cache statically known property name references from within
- * the class.  Current statistics shows in class references dominating
- * by 91.5% of all static property access.
- */
-struct SPropCache {
-  TypedValue* m_tv;  // public; it is used from TC and we assert the offset
+namespace MethodCache {
 
-  static RDS::Handle alloc(const StringData* sd);
-
-  template<bool raiseOnError>
-  static TypedValue* lookup(RDS::Handle handle, const Class* cls,
-                            const StringData* nm, Class* ctx);
-
-  template<bool raiseOnError>
-  static TypedValue* lookupSProp(const Class *cls, const StringData *name,
-                                 Class* ctx);
-};
-
-//////////////////////////////////////////////////////////////////////
+constexpr int kMovLen = 10;
+constexpr int kMovImmOff = 2;
 
 /*
  * Method cache entries cache the dispatch target for a function call.
@@ -141,35 +123,20 @@ struct SPropCache {
  * the __call function).  The second lowest bit of the key is set if
  * the cached Func has AttrStatic.
  */
-struct MethodCache {
+struct Entry {
   uintptr_t m_key;
   const Func* m_value;
 };
 
-/*
- * When we first create method cache entries, we need some information
- * for pmethodCacheMissPath to set up an immediate for the first
- * dispatched function.  A pointer to one of these is passed in
- * pdataRaw to pmethodCacheMissPath.
- */
-struct MethodCachePrimeData {
-  JIT::TCA smashImmAddr;
-  JIT::TCA retAddr;
-};
-
 template<bool fatal>
-void methodCacheSlowPath(MethodCache* mce,
-                         ActRec* ar,
-                         StringData* name,
-                         Class* cls,
-                         uintptr_t mcePrime);
-
-template<bool fatal>
-void pmethodCacheMissPath(MethodCache* mce,
+void handlePrimeCacheInit(Entry* mce,
                           ActRec* ar,
                           StringData* name,
                           Class* cls,
-                          uintptr_t pdataRaw);
+                          Class* ctx,
+                          uintptr_t rawTarget);
+
+} // namespace MethodCache
 
 //////////////////////////////////////////////////////////////////////
 

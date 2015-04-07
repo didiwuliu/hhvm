@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -40,16 +40,7 @@ struct Variant;
  * should actually be called.
  */
 struct ArrayCommon {
-  /*
-   * Super generic cases---these functions aren't really vararg; we
-   * cast them to the appropriate signatures.
-   */
-  static void* ReturnNull(...);
-  static bool ReturnFalse(...);
-  static bool ReturnTrue(...);
-  static ArrayData* ReturnFirstArg(ArrayData*, ...);
   static ssize_t ReturnInvalidIndex(const ArrayData*);
-  static void NoOp(...);
 
   /*
    * The normal case for ValidMArrayIter is shared between packed and

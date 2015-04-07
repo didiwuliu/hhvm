@@ -17,21 +17,32 @@
 #ifndef HPHP_IDL_H
 #define HPHP_IDL_H
 
-#include "folly/Conv.h"
-#include "folly/DynamicConverter.h"
-#include "folly/FBString.h"
-#include "folly/FBVector.h"
+#include <folly/Conv.h>
+#include <folly/DynamicConverter.h>
+#include <folly/FBString.h>
+#include <folly/FBVector.h>
 
 #include "hphp/runtime/base/datatype.h"
 
 using folly::fbstring;
 using folly::fbvector;
 
+#define KindOfInvalid kInvalidDataType
+#define KindOfAny     static_cast<DataType>(-8)
+
 namespace HPHP { namespace IDL {
 /////////////////////////////////////////////////////////////////////////////
 
+void makeInvocationTrace(fbstring& invocation_trace,
+                         int argc,
+                         const char* argv[]);
+
+void brandOutputFile(std::ostream& out,
+                     const char* short_name,
+                     const fbstring& invocation_trace);
+
 enum FuncFlags {
-  ZendParamModeNull             = (1 <<  0),
+  ParamCoerceModeNull           = (1 <<  0),
   CppCustomDelete               = (1 <<  1),
   IsAbstract                    = (1 <<  4),
   IsFinal                       = (1 <<  5),
@@ -48,31 +59,28 @@ enum FuncFlags {
   HipHopSpecific                = (1 << 16),
   VariableArguments             = (1 << 17),
   RefVariableArguments          = (1 << 18),
-  MixedVariableArguments        = (1 << 19),
   FunctionIsFoldable            = (1 << 20),
   NoEffect                      = (1 << 21),
   NoInjection                   = (1 << 22),
   HasOptFunction                = (1 << 23),
   AllowIntercept                = (1 << 24),
   NoProfile                     = (1 << 25),
-  ContextSensitive              = (1 << 26),
+  // unused (1 << 26),
   NoDefaultSweep                = (1 << 27),
   IsSystem                      = (1 << 28),
   IsTrait                       = (1 << 29),
-  ZendParamModeFalse            = (1 << 30),
+  ParamCoerceModeFalse          = (1 << 30),
   NoFCallBuiltin                = (1 << 31),
 };
 
-#define VarArgsMask (VariableArguments | \
-                     RefVariableArguments | \
-                     MixedVariableArguments)
+#define VarArgsMask (VariableArguments | RefVariableArguments)
 
 bool isKindOfIndirect(DataType kindof);
 
 static inline fbstring kindOfString(DataType t) {
-  switch (t) {
+  switch ((int)t) {
+    case KindOfInvalid:      return "Unknown";
     case KindOfAny:          return "Any";
-    case KindOfUnknown:      return "Unknown";
     case KindOfNull:         return "Null";
     case KindOfBoolean:      return "Boolean";
     case KindOfInt64:        return "Int64";
@@ -152,7 +160,7 @@ class PhpConst {
     auto it = m_constant.find("value");
     assert(it != m_constant.items().end());
     auto v = it->second;
-    return v.isNull() ? "uninit_null()" : v.asString();
+    return v.isNull() ? "init_null()" : v.asString();
   }
 
   fbstring serialize() const { return phpSerialize(m_constant["value"]); }
@@ -194,9 +202,7 @@ class PhpParam {
   bool hasDefault() const {
     return m_param.find("value") != m_param.items().end();
   }
-  fbstring getDefault() const {
-    return hasDefault() ? m_param["value"].asString() : "";
-  }
+  fbstring getDefault() const;
   fbstring getDefaultSerialized() const;
   fbstring getDefaultPhp() const;
 
@@ -247,7 +253,8 @@ class PhpFunc {
               (m_idlName == "__call")));
   }
 
-  fbstring getCppSig() const;
+  fbstring getCppSig(bool fullyQualified = true) const;
+  fbstring getPrefixedCppName(bool fullyQualified = true) const;
 
   fbstring getPrettyName() const {
     if (isMethod()) {

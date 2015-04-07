@@ -17,10 +17,13 @@
 #ifndef incl_HPHP_VM_HHBC_H_
 #define incl_HPHP_VM_HHBC_H_
 
-#include "folly/Optional.h"
+#include <folly/Optional.h>
 
-#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/base/typed-value.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 namespace HPHP {
 
@@ -28,15 +31,19 @@ namespace HPHP {
 
 struct Unit;
 
-// Variable-size immediates are implemented as follows. To determine which size
-// the immediate is, examine the first byte where the immediate is expected, and
-// examine its low-order bit. If it is zero, it's a 1-byte immediate; otherwise,
-// it's 4 bytes. The immediate has to be logical-shifted to the right by one to
-// get rid of the flag bit.
-
-// The types in this macro for MA, BLA, and SLA are meaningless since
-// they are never read out of ArgUnion (they use ImmVector and
-// ImmVectorO).
+/*
+ * Variable-size immediates are implemented as follows: To determine which size
+ * the immediate is, examine the first byte where the immediate is expected,
+ * and examine its low-order bit.  If it is zero, it's a 1-byte immediate;
+ * otherwise, it's 4 bytes.  The immediate has to be logical-shifted to the
+ * right by one to get rid of the flag bit.
+ *
+ * The types in this macro for MA, BLA, and SLA are meaningless since they are
+ * never read out of ArgUnion (they use ImmVector and ImmVectorO).
+ *
+ * ArgTypes and their various decoding helpers should be kept in sync with the
+ * `hhx' bytecode inspection GDB command.
+ */
 #define ARGTYPES                                                          \
   ARGTYPE(NA,     void*)         /* unused */                             \
   ARGTYPEVEC(MA,  int32_t)       /* Member vector immediate */            \
@@ -50,6 +57,7 @@ struct Unit;
   ARGTYPE(DA,     double)        /* Double */                             \
   ARGTYPE(SA,     Id)            /* Static string ID */                   \
   ARGTYPE(AA,     Id)            /* Static array ID */                    \
+  ARGTYPE(RATA,   RepoAuthType)  /* Statically inferred RepoAuthType */   \
   ARGTYPE(BA,     Offset)        /* Bytecode offset */                    \
   ARGTYPE(OA,     unsigned char) /* Sub-opcode, untyped */                \
   ARGTYPEVEC(VSA, Id)            /* Vector of static string IDs */
@@ -63,6 +71,7 @@ enum ArgType {
 };
 
 union ArgUnion {
+  ArgUnion() : u_LA{0} {}
   char bytes[0];
 #define ARGTYPE(name, type) type u_##name;
 #define ARGTYPEVEC(name, type) type u_##name;
@@ -82,15 +91,30 @@ enum FlavorDesc {
   FV,   // Function parameter (cell or var)
   UV,   // Uninit
   CVV,  // Cell or Var argument
+  CUV,  // Cell, or Uninit argument
   CVUV, // Cell, Var, or Uninit argument
 };
 
 enum InstrFlags {
-  NF = 0x0, // No flags
-  TF = 0x1, // Next instruction is not reachable via fall through or the
-            //   callee returning control
-  CF = 0x2, // Control flow instruction (branch, call, return, throw, etc)
-  FF = 0x4, // Instruction uses current FPI
+  /* No flags. */
+  NF = 0x0,
+
+  /* Terminal: next instruction is not reachable via fall through or the callee
+   * returning control. This includes instructions like Throw and Unwind that
+   * always throw exceptions. */
+  TF = 0x1,
+
+  /* Control flow: If this instruction finishes executing (doesn't throw an
+   * exception), vmpc() is not guaranteed to point to the next instruction in
+   * the bytecode stream. This does not take VM reentry into account, as that
+   * operation is part of the instruction that performed the reentry, and does
+   * not affect what vmpc() is set to after the instruction completes. */
+  CF = 0x2,
+
+  /* Instruction uses current FPI. */
+  FF = 0x4,
+
+  /* Shorthand for common combinations. */
   CF_TF = (CF | TF),
   CF_FF = (CF | FF)
 };
@@ -122,9 +146,9 @@ enum LocationCode {
   // Base is a function return value.
   LR,
 
-  NumLocationCodes,
-  InvalidLocationCode = NumLocationCodes
+  InvalidLocationCode, // keep this last
 };
+constexpr int NumLocationCodes = InvalidLocationCode;
 
 inline int numLocationCodeImms(LocationCode lc) {
   switch (lc) {
@@ -132,9 +156,10 @@ inline int numLocationCodeImms(LocationCode lc) {
     return 1;
   case LC: case LH: case LGC: case LNC: case LSC: case LR:
     return 0;
-  default:
-    not_reached();
+  case InvalidLocationCode:
+    break;
   }
+  not_reached();
 }
 
 inline int numLocationCodeStackVals(LocationCode lc) {
@@ -145,9 +170,10 @@ inline int numLocationCodeStackVals(LocationCode lc) {
     return 1;
   case LSC:
     return 2;
-  default:
-    not_reached();
+  case InvalidLocationCode:
+    break;
   }
+  not_reached();
 }
 
 // Returns string representation of `lc'.  (Pointer to internal static
@@ -160,6 +186,12 @@ const char* locationCodeString(LocationCode lc);
 // is more junk after the first two bytes.
 LocationCode parseLocationCode(const char* s);
 
+
+/**
+ * E - an element, $x['y']
+ * P - a property, $x->y
+ * Q - a NullSafe version of P, $x?->y
+ */
 enum MemberCode {
   // Element and property, consuming a cell from the stack.
   MEC,
@@ -172,6 +204,7 @@ enum MemberCode {
   // Element and property, using a string immediate
   MET,
   MPT,
+  MQT,
 
   // Element, using an int64 immediate
   MEI,
@@ -179,9 +212,10 @@ enum MemberCode {
   // New element operation.  (No real stack element.)
   MW,
 
-  NumMemberCodes,
-  InvalidMemberCode = NumMemberCodes
+  InvalidMemberCode,
 };
+
+constexpr int NumMemberCodes = InvalidMemberCode;
 
 enum MInstrAttr {
   MIA_none         = 0x00,
@@ -279,7 +313,8 @@ struct MInstrInfo {
 };
 
 inline bool memberCodeHasImm(MemberCode mc) {
-  return mc == MEL || mc == MPL || mc == MET || mc == MPT || mc == MEI;
+  return mc == MEL || mc == MPL || mc == MET ||
+    mc == MPT || mc == MEI || mc == MQT;
 }
 
 inline bool memberCodeImmIsLoc(MemberCode mc) {
@@ -287,7 +322,7 @@ inline bool memberCodeImmIsLoc(MemberCode mc) {
 }
 
 inline bool memberCodeImmIsString(MemberCode mc) {
-  return mc == MET || mc == MPT;
+  return mc == MET || mc == MPT || mc == MQT;
 }
 
 inline bool memberCodeImmIsInt(MemberCode mc) {
@@ -375,54 +410,6 @@ enum class InitPropOp : uint8_t {
 #undef INITPROP_OP
 };
 
-// NB: right now hphp/hhbbc/abstract-interp.cpp depends on this enum
-// being in order from smaller types to larger ones.
-#define ASSERTT_OPS                             \
-  ASSERTT_OP(Uninit)                            \
-  ASSERTT_OP(InitNull)                          \
-  ASSERTT_OP(Null)                              \
-  ASSERTT_OP(Int)                               \
-  ASSERTT_OP(OptInt)                            \
-  ASSERTT_OP(Dbl)                               \
-  ASSERTT_OP(OptDbl)                            \
-  ASSERTT_OP(Res)                               \
-  ASSERTT_OP(OptRes)                            \
-  ASSERTT_OP(Bool)                              \
-  ASSERTT_OP(OptBool)                           \
-  ASSERTT_OP(SStr)                              \
-  ASSERTT_OP(OptSStr)                           \
-  ASSERTT_OP(Str)                               \
-  ASSERTT_OP(OptStr)                            \
-  ASSERTT_OP(SArr)                              \
-  ASSERTT_OP(OptSArr)                           \
-  ASSERTT_OP(Arr)                               \
-  ASSERTT_OP(OptArr)                            \
-  ASSERTT_OP(Obj)                               \
-  ASSERTT_OP(OptObj)                            \
-  ASSERTT_OP(InitUnc)                           \
-  ASSERTT_OP(Unc)                               \
-  ASSERTT_OP(InitCell)                          \
-  ASSERTT_OP(Cell)                              \
-  ASSERTT_OP(Ref)
-
-enum class AssertTOp : uint8_t {
-#define ASSERTT_OP(op) op,
-  ASSERTT_OPS
-#undef ASSERTT_OP
-};
-
-#define ASSERTOBJ_OPS                           \
-  ASSERTOBJ_OP(Exact)                           \
-  ASSERTOBJ_OP(Sub)                             \
-  ASSERTOBJ_OP(OptExact)                        \
-  ASSERTOBJ_OP(OptSub)
-
-enum class AssertObjOp : uint8_t {
-#define ASSERTOBJ_OP(op) op,
-  ASSERTOBJ_OPS
-#undef ASSERTOBJ_OP
-};
-
 enum IterKind {
   KindOfIter  = 0,
   KindOfMIter = 1,
@@ -449,6 +436,7 @@ enum class FatalOp : uint8_t {
   SETOP_OP(MulEqual,    OpMul) \
   SETOP_OP(ConcatEqual, OpConcat) \
   SETOP_OP(DivEqual,    OpDiv) \
+  SETOP_OP(PowEqual,    OpPow) \
   SETOP_OP(ModEqual,    OpMod) \
   SETOP_OP(AndEqual,    OpBitAnd) \
   SETOP_OP(OrEqual,     OpBitOr) \
@@ -457,7 +445,7 @@ enum class FatalOp : uint8_t {
   SETOP_OP(SrEqual,     OpShr)  \
   SETOP_OP(PlusEqualO,  OpAddO) \
   SETOP_OP(MinusEqualO, OpSubO) \
-  SETOP_OP(MulEqualO,   OpMulO)
+  SETOP_OP(MulEqualO,   OpMulO) \
 
 enum class SetOpOp : uint8_t {
 #define SETOP_OP(setOpOp, bcOp) setOpOp,
@@ -476,6 +464,39 @@ enum class BareThisOp : uint8_t {
 #undef BARETHIS_OP
 };
 
+#define SILENCE_OPS \
+  SILENCE_OP(Start) \
+  SILENCE_OP(End)
+
+enum class SilenceOp : uint8_t {
+#define SILENCE_OP(x) x,
+  SILENCE_OPS
+#undef SILENCE_OP
+};
+
+#define OO_DECL_EXISTS_OPS                             \
+  OO_DECL_EXISTS_OP(Class)                             \
+  OO_DECL_EXISTS_OP(Interface)                         \
+  OO_DECL_EXISTS_OP(Trait)
+
+enum class OODeclExistsOp : uint8_t {
+#define OO_DECL_EXISTS_OP(x) x,
+  OO_DECL_EXISTS_OPS
+#undef OO_DECL_EXISTS_OP
+};
+
+#define OBJMETHOD_OPS                             \
+  OBJMETHOD_OP(NullThrows)                        \
+  OBJMETHOD_OP(NullSafe)
+
+enum class ObjMethodOp : uint8_t {
+#define OBJMETHOD_OP(x) x,
+  OBJMETHOD_OPS
+#undef OBJMETHOD_OP
+};
+
+constexpr int32_t kMaxConcatN = 4;
+
 //  name             immediates        inputs           outputs     flags
 #define OPCODES \
   O(LowInvalid,      NA,               NOV,             NOV,        NF) \
@@ -492,6 +513,7 @@ enum class BareThisOp : uint8_t {
   O(BoxRNop,         NA,               ONE(RV),         ONE(VV),    NF) \
   O(UnboxR,          NA,               ONE(RV),         ONE(CV),    NF) \
   O(UnboxRNop,       NA,               ONE(RV),         ONE(CV),    NF) \
+  O(RGetCNop,        NA,               ONE(CV),         ONE(RV),    NF) \
   O(Null,            NA,               NOV,             ONE(CV),    NF) \
   O(NullUninit,      NA,               NOV,             ONE(UV),    NF) \
   O(True,            NA,               NOV,             ONE(CV),    NF) \
@@ -501,6 +523,8 @@ enum class BareThisOp : uint8_t {
   O(String,          ONE(SA),          NOV,             ONE(CV),    NF) \
   O(Array,           ONE(AA),          NOV,             ONE(CV),    NF) \
   O(NewArray,        ONE(IVA),         NOV,             ONE(CV),    NF) \
+  O(NewMixedArray,   ONE(IVA),         NOV,             ONE(CV),    NF) \
+  O(NewLikeArrayL,   TWO(LA,IVA),      NOV,             ONE(CV),    NF) \
   O(NewPackedArray,  ONE(IVA),         CMANY,           ONE(CV),    NF) \
   O(NewStructArray,  ONE(VSA),         SMANY,           ONE(CV),    NF) \
   O(AddElemC,        NA,               THREE(CV,CV,CV), ONE(CV),    NF) \
@@ -519,6 +543,7 @@ enum class BareThisOp : uint8_t {
   O(File,            NA,               NOV,             ONE(CV),    NF) \
   O(Dir,             NA,               NOV,             ONE(CV),    NF) \
   O(Concat,          NA,               TWO(CV,CV),      ONE(CV),    NF) \
+  O(ConcatN,         ONE(IVA),         CMANY,           ONE(CV),    NF) \
   O(Add,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Sub,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Mul,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
@@ -527,7 +552,7 @@ enum class BareThisOp : uint8_t {
   O(MulO,            NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Div,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Mod,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
-  O(Sqrt,            NA,               ONE(CV),         ONE(CV),    NF) \
+  O(Pow,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Xor,             NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(Not,             NA,               ONE(CV),         ONE(CV),    NF) \
   O(Same,            NA,               TWO(CV,CV),      ONE(CV),    NF) \
@@ -555,7 +580,7 @@ enum class BareThisOp : uint8_t {
   O(Print,           NA,               ONE(CV),         ONE(CV),    NF) \
   O(Clone,           NA,               ONE(CV),         ONE(CV),    NF) \
   O(Exit,            NA,               ONE(CV),         ONE(CV),    NF) \
-  O(Fatal,           ONE(OA(FatalOp)), ONE(CV),         NOV,        CF_TF) \
+  O(Fatal,           ONE(OA(FatalOp)), ONE(CV),         NOV,        TF) \
   O(Jmp,             ONE(BA),          NOV,             NOV,        CF_TF) \
   O(JmpNS,           ONE(BA),          NOV,             NOV,        CF_TF) \
   O(JmpZ,            ONE(BA),          ONE(CV),         NOV,        CF) \
@@ -565,9 +590,10 @@ enum class BareThisOp : uint8_t {
   O(SSwitch,         ONE(SLA),         ONE(CV),         NOV,        CF_TF) \
   O(RetC,            NA,               ONE(CV),         NOV,        CF_TF) \
   O(RetV,            NA,               ONE(VV),         NOV,        CF_TF) \
-  O(Unwind,          NA,               NOV,             NOV,        CF_TF) \
-  O(Throw,           NA,               ONE(CV),         NOV,        CF_TF) \
+  O(Unwind,          NA,               NOV,             NOV,        TF) \
+  O(Throw,           NA,               ONE(CV),         NOV,        TF) \
   O(CGetL,           ONE(LA),          NOV,             ONE(CV),    NF) \
+  O(CUGetL,          ONE(LA),          NOV,             ONE(CUV),   NF) \
   O(CGetL2,          ONE(LA),          NOV,             INS_1(CV),  NF) \
   O(CGetL3,          ONE(LA),          NOV,             INS_2(CV),  NF) \
   O(PushL,           ONE(LA),          NOV,             ONE(CV),    NF) \
@@ -582,6 +608,7 @@ enum class BareThisOp : uint8_t {
   O(VGetM,           ONE(MA),          MMANY,           ONE(VV),    NF) \
   O(AGetC,           NA,               ONE(CV),         ONE(AV),    NF) \
   O(AGetL,           ONE(LA),          NOV,             ONE(AV),    NF) \
+  O(GetMemoKey,      NA,               ONE(CV),         ONE(CV),    NF) \
   O(AKExists,        NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(IssetL,          ONE(LA),          NOV,             ONE(CV),    NF) \
   O(IssetN,          NA,               ONE(CV),         ONE(CV),    NF) \
@@ -596,20 +623,8 @@ enum class BareThisOp : uint8_t {
   O(IsTypeC,         ONE(OA(IsTypeOp)),ONE(CV),         ONE(CV),    NF) \
   O(IsTypeL,         TWO(LA,                                            \
                        OA(IsTypeOp)),  NOV,             ONE(CV),    NF) \
-  O(AssertTL,        TWO(LA,                                            \
-                       OA(AssertTOp)), NOV,             NOV,        NF) \
-  O(AssertTStk,      TWO(IVA,                                           \
-                       OA(AssertTOp)), NOV,             NOV,        NF) \
-  O(AssertObjL,      THREE(LA,SA,                                       \
-                       OA(AssertObjOp)),                                \
-                                       NOV,             NOV,        NF) \
-  O(AssertObjStk,    THREE(IVA,SA,                                      \
-                       OA(AssertObjOp)),                                \
-                                       NOV,             NOV,        NF) \
-  O(PredictTL,       TWO(LA,                                            \
-                       OA(AssertTOp)), NOV,             NOV,        NF) \
-  O(PredictTStk,     TWO(IVA,                                           \
-                       OA(AssertTOp)), NOV,             NOV,        NF) \
+  O(AssertRATL,      TWO(LA,RATA),     NOV,             NOV,        NF) \
+  O(AssertRATStk,    TWO(IVA,RATA),    NOV,             NOV,        NF) \
   O(SetL,            ONE(LA),          ONE(CV),         ONE(CV),    NF) \
   O(SetN,            NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(SetG,            NA,               TWO(CV,CV),      ONE(CV),    NF) \
@@ -644,8 +659,10 @@ enum class BareThisOp : uint8_t {
   O(FPushFunc,       ONE(IVA),         ONE(CV),         NOV,        NF) \
   O(FPushFuncD,      TWO(IVA,SA),      NOV,             NOV,        NF) \
   O(FPushFuncU,      THREE(IVA,SA,SA), NOV,             NOV,        NF) \
-  O(FPushObjMethod,  ONE(IVA),         TWO(CV,CV),      NOV,        NF) \
-  O(FPushObjMethodD, TWO(IVA,SA),      ONE(CV),         NOV,        NF) \
+  O(FPushObjMethod,  TWO(IVA,                                           \
+                       OA(ObjMethodOp)), TWO(CV,CV),    NOV,        NF) \
+  O(FPushObjMethodD, THREE(IVA,SA,                                      \
+                       OA(ObjMethodOp)), ONE(CV),       NOV,        NF) \
   O(FPushClsMethod,  ONE(IVA),         TWO(AV,CV),      NOV,        NF) \
   O(FPushClsMethodF, ONE(IVA),         TWO(AV,CV),      NOV,        NF) \
   O(FPushClsMethodD, THREE(IVA,SA,SA), NOV,             NOV,        NF) \
@@ -668,8 +685,9 @@ enum class BareThisOp : uint8_t {
   O(FPassM,          TWO(IVA,MA),      MMANY,           ONE(FV),    FF) \
   O(FCall,           ONE(IVA),         FMANY,           ONE(RV),    CF_FF) \
   O(FCallD,          THREE(IVA,SA,SA), FMANY,           ONE(RV),    CF_FF) \
+  O(FCallUnpack,     ONE(IVA),         FMANY,           ONE(RV),    CF_FF) \
   O(FCallArray,      NA,               ONE(FV),         ONE(RV),    CF_FF) \
-  O(FCallBuiltin,    THREE(IVA,IVA,SA),CVUMANY,         ONE(RV),    CF) \
+  O(FCallBuiltin,    THREE(IVA,IVA,SA),CVUMANY,         ONE(RV),    NF) \
   O(CufSafeArray,    NA,               THREE(RV,CV,CV), ONE(CV),    NF) \
   O(CufSafeReturn,   NA,               THREE(RV,CV,CV), ONE(RV),    NF) \
   O(IterInit,        THREE(IA,BA,LA),  ONE(CV),         NOV,        CF) \
@@ -697,53 +715,47 @@ enum class BareThisOp : uint8_t {
   O(Eval,            NA,               ONE(CV),         ONE(CV),    CF) \
   O(DefFunc,         ONE(IVA),         NOV,             NOV,        NF) \
   O(DefCls,          ONE(IVA),         NOV,             NOV,        NF) \
-  O(NopDefCls,       ONE(IVA),         NOV,             NOV,        NF) \
+  O(DefClsNop,       ONE(IVA),         NOV,             NOV,        NF) \
   O(DefCns,          ONE(SA),          ONE(CV),         ONE(CV),    NF) \
   O(DefTypeAlias,    ONE(IVA),         NOV,             NOV,        NF) \
   O(This,            NA,               NOV,             ONE(CV),    NF) \
   O(BareThis,        ONE(OA(BareThisOp)),                               \
                                        NOV,             ONE(CV),    NF) \
   O(CheckThis,       NA,               NOV,             NOV,        NF) \
-  O(InitThisLoc,     ONE(IVA),         NOV,             NOV,        NF) \
-  O(StaticLoc,       TWO(IVA,SA),      NOV,             ONE(CV),    NF) \
-  O(StaticLocInit,   TWO(IVA,SA),      ONE(CV),         NOV,        NF) \
+  O(InitThisLoc,     ONE(LA),          NOV,             NOV,        NF) \
+  O(StaticLoc,       TWO(LA,SA),       NOV,             ONE(CV),    NF) \
+  O(StaticLocInit,   TWO(LA,SA),       ONE(CV),         NOV,        NF) \
   O(Catch,           NA,               NOV,             ONE(CV),    NF) \
-  O(ClassExists,     NA,               TWO(CV,CV),      ONE(CV),    NF) \
-  O(InterfaceExists, NA,               TWO(CV,CV),      ONE(CV),    NF) \
-  O(TraitExists,     NA,               TWO(CV,CV),      ONE(CV),    NF) \
-  O(VerifyParamType, ONE(IVA),         NOV,             NOV,        NF) \
+  O(OODeclExists,    ONE(OA(OODeclExistsOp)),                           \
+                                       TWO(CV,CV),      ONE(CV),    NF) \
+  O(VerifyParamType, ONE(LA),          NOV,             NOV,        NF) \
   O(VerifyRetTypeC,  NA,               ONE(CV),         ONE(CV),    NF) \
   O(VerifyRetTypeV,  NA,               ONE(VV),         ONE(VV),    NF) \
   O(Self,            NA,               NOV,             ONE(AV),    NF) \
   O(Parent,          NA,               NOV,             ONE(AV),    NF) \
   O(LateBoundCls,    NA,               NOV,             ONE(AV),    NF) \
   O(NativeImpl,      NA,               NOV,             NOV,        CF_TF) \
-  O(CreateCl,        TWO(IVA,SA),      CVMANY,          ONE(CV),    NF) \
+  O(CreateCl,        TWO(IVA,SA),      CVUMANY,         ONE(CV),    NF) \
   O(CreateCont,      NA,               NOV,             ONE(CV),    CF) \
-  O(ContEnter,       NA,               ONE(CV),         NOV,        CF) \
-  O(ContRaise,       NA,               ONE(CV),         NOV,        CF) \
-  O(ContSuspend,     NA,               ONE(CV),         ONE(CV),    NF) \
-  O(ContSuspendK,    NA,               TWO(CV,CV),      ONE(CV),    NF) \
+  O(ContEnter,       NA,               ONE(CV),         ONE(CV),    CF) \
+  O(ContRaise,       NA,               ONE(CV),         ONE(CV),    CF) \
+  O(Yield,           NA,               ONE(CV),         ONE(CV),    CF) \
+  O(YieldK,          NA,               TWO(CV,CV),      ONE(CV),    CF) \
   O(ContCheck,       ONE(IVA),         NOV,             NOV,        NF) \
   O(ContValid,       NA,               NOV,             ONE(CV),    NF) \
   O(ContKey,         NA,               NOV,             ONE(CV),    NF) \
   O(ContCurrent,     NA,               NOV,             ONE(CV),    NF) \
-  O(ContStopped,     NA,               NOV,             NOV,        NF) \
-  O(ContHandle,      NA,               ONE(CV),         NOV,        CF_TF) \
-  O(AsyncAwait,      NA,               ONE(CV),         TWO(CV,CV), NF) \
-  O(AsyncSuspend,    TWO(BA,IVA),      ONE(CV),         ONE(CV),    CF) \
-  O(AsyncResume,     NA,               NOV,             NOV,        NF) \
+  O(Await,           ONE(IVA),         ONE(CV),         ONE(CV),    CF) \
   O(Strlen,          NA,               ONE(CV),         ONE(CV),    NF) \
   O(IncStat,         TWO(IVA,IVA),     NOV,             NOV,        NF) \
-  O(Abs,             NA,               ONE(CV),         ONE(CV),    NF) \
   O(Idx,             NA,               THREE(CV,CV,CV), ONE(CV),    NF) \
   O(ArrayIdx,        NA,               THREE(CV,CV,CV), ONE(CV),    NF) \
-  O(Floor,           NA,               ONE(CV),         ONE(CV),    NF) \
-  O(Ceil,            NA,               ONE(CV),         ONE(CV),    NF) \
   O(CheckProp,       ONE(SA),          NOV,             ONE(CV),    NF) \
   O(InitProp,        TWO(SA,                                            \
                        OA(InitPropOp)),ONE(CV),         NOV,        NF) \
-  O(HighInvalid,     NA,               NOV,             NOV,        NF) \
+  O(Silence,         TWO(LA,OA(SilenceOp)),                          \
+                                       NOV,             NOV,        NF) \
+  O(HighInvalid,     NA,               NOV,             NOV,        NF)
 
 enum class Op : uint8_t {
 #define O(name, ...) name,
@@ -773,21 +785,20 @@ inline bool isValidOpcode(Op op) {
 
 const MInstrInfo& getMInstrInfo(Op op);
 
-enum AstubsOp {
-  OpAstubStart = Op_count-1,
-#define O(name, imm, pop, push, flags) OpAstub##name,
+enum AcoldOp {
+  OpAcoldStart = Op_count-1,
+#define O(name, imm, pop, push, flags) OpAcold##name,
   OPCODES
 #undef O
-  OpAstubCount
+  OpAcoldCount
 };
 
 #define HIGH_OPCODES \
   O(FuncPrologue) \
-  O(TraceletGuard) \
-  O(NativeTrampoline)
+  O(TraceletGuard)
 
 enum HighOp {
-  OpHighStart = OpAstubCount-1,
+  OpHighStart = OpAcoldCount-1,
 #define O(name) Op##name,
   HIGH_OPCODES
 #undef O
@@ -902,7 +913,7 @@ struct MVectorItem {
 bool hasMVector(Op op);
 std::vector<MVectorItem> getMVector(const Op* opcode);
 
-/* Some decoding helper functions. */
+// Some decoding helper functions.
 int numImmediates(Op opcode);
 ArgType immType(Op opcode, int idx);
 int immSize(const Op* opcode, int idx);
@@ -912,8 +923,13 @@ int instrLen(const Op* opcode);
 int numSuccs(const Op* opcode);
 bool pushesActRec(Op opcode);
 
-// The returned struct has normalized variable-sized immediates
+/*
+ * The returned struct has normalized variable-sized immediates
+ *
+ * Don't use with RATA immediates.
+ */
 ArgUnion getImm(const Op* opcode, int idx);
+
 // Don't use this with variable-sized immediates!
 ArgUnion* getImmPtr(const Op* opcode, int idx);
 
@@ -959,12 +975,13 @@ void staticArrayStreamer(ArrayData*, std::ostream&);
 const char* opcodeToName(Op op);
 const char* subopToName(InitPropOp);
 const char* subopToName(IsTypeOp);
-const char* subopToName(AssertTOp);
-const char* subopToName(AssertObjOp);
 const char* subopToName(FatalOp);
 const char* subopToName(SetOpOp);
 const char* subopToName(IncDecOp);
 const char* subopToName(BareThisOp);
+const char* subopToName(SilenceOp);
+const char* subopToName(OODeclExistsOp);
+const char* subopToName(ObjMethodOp);
 
 /*
  * Try to parse a string into a subop name of a given type.
@@ -984,18 +1001,41 @@ Offset* instrJumpOffset(const Op* instr);
 //   cannot jump
 Offset instrJumpTarget(const Op* instrs, Offset pos);
 
+/*
+ * Returns the set of bytecode offsets for the instructions that may
+ * be executed immediately after opc.
+ */
+using OffsetSet = hphp_hash_set<Offset>;
+OffsetSet instrSuccOffsets(Op* opc, const Unit* unit);
+
 struct StackTransInfo {
   enum class Kind {
     PushPop,
     InsertMid
   };
   Kind kind;
-  int numPops;
-  int numPushes;
-  int pos;
+  int numPops;   // only for PushPop
+  int numPushes; // only for PushPop
+  int pos;       // only for InsertMid
 };
 
+/*
+ * Some CF instructions can be treated as non-CF instructions for most analysis
+ * purposes, such as bytecode verification and HHBBC. These instructions change
+ * vmpc() to point somewhere in a different function, but the runtime
+ * guarantees that if excution ever returns to the original frame, it will be
+ * at the location immediately following the instruction in question. This
+ * creates the illusion that the instruction fell through normally to the
+ * instruction after it, within the context of its execution frame.
+ *
+ * The canonical example of this behavior is the FCall instruction, so we use
+ * "non-call control flow" to describe the set of CF instruction that do not
+ * exhibit this behavior. This function returns true if `opcode' is a non-call
+ * control flow instruction.
+ */
 bool instrIsNonCallControlFlow(Op opcode);
+
+bool instrHasConditionalBranch(Op opcode);
 bool instrAllowsFallThru(Op opcode);
 bool instrReadsCurrentFpi(Op opcode);
 
@@ -1005,23 +1045,27 @@ constexpr InstrFlags instrFlagsData[] = {
 #undef O
 };
 
-constexpr inline InstrFlags instrFlags(Op opcode) {
+constexpr InstrFlags instrFlags(Op opcode) {
   return instrFlagsData[uint8_t(opcode)];
 }
 
-constexpr inline bool instrIsControlFlow(Op opcode) {
+constexpr bool instrIsControlFlow(Op opcode) {
   return (instrFlags(opcode) & CF) != 0;
 }
 
-constexpr inline bool instrMayBeInitialSuspend(Op opcode) {
-  return opcode == Op::AsyncSuspend || opcode == Op::CreateCont;
-}
-
-constexpr inline bool isUnconditionalJmp(Op opcode) {
+constexpr bool isUnconditionalJmp(Op opcode) {
   return opcode == Op::Jmp || opcode == Op::JmpNS;
 }
 
-inline bool isFPush(Op opcode) {
+constexpr bool isConditionalJmp(Op opcode) {
+  return opcode == Op::JmpZ || opcode == Op::JmpNZ;
+}
+
+constexpr bool isJmp(Op opcode) {
+  return opcode >= Op::Jmp && opcode <= Op::JmpNZ;
+}
+
+constexpr bool isFPush(Op opcode) {
   return opcode >= OpFPushFunc && opcode <= OpFPushCufSafe;
 }
 
@@ -1030,6 +1074,7 @@ inline bool isFCallStar(Op opcode) {
     case Op::FCall:
     case Op::FCallD:
     case Op::FCallArray:
+    case Op::FCallUnpack:
       return true;
     default:
       return false;
@@ -1055,55 +1100,16 @@ inline bool isFPassStar(Op opcode) {
   }
 }
 
-inline bool isLiteral(Op op) {
-  switch (op) {
-    case OpNull:
-    case OpNullUninit:
-    case OpTrue:
-    case OpFalse:
-    case OpInt:
-    case OpDouble:
-    case OpString:
-    case OpArray:
-      return true;
-
-    default:
-      return false;
-  }
+constexpr bool isRet(Op op) {
+  return op == OpRetC || op == OpRetV;
 }
 
-inline bool isThisSelfOrParent(Op op) {
-  switch (op) {
-    case OpThis:
-    case OpSelf:
-    case OpParent:
-      return true;
-
-    default:
-      return false;
-  }
+constexpr bool isSwitch(Op op) {
+  return op == OpSwitch || op == OpSSwitch;
 }
 
-inline bool isRet(Op op) {
-  switch (op) {
-    case OpRetC:
-    case OpRetV:
-      return true;
-
-    default:
-      return false;
-  }
-}
-
-inline bool isSwitch(Op op) {
-  switch (op) {
-    case OpSwitch:
-    case OpSSwitch:
-      return true;
-
-    default:
-      return false;
-  }
+constexpr bool isTypeAssert(Op op) {
+  return op == OpAssertRATL || op == OpAssertRATStk;
 }
 
 template<typename Out, typename In>
@@ -1142,27 +1148,27 @@ FlavorDesc instrInputFlavor(const Op* op, uint32_t idx);
 StackTransInfo instrStackTransInfo(const Op* opcode);
 int instrSpToArDelta(const Op* opcode);
 
-inline bool mcodeIsLiteral(MemberCode mcode) {
-  return mcode == MET || mcode == MEI || mcode == MPT;
+constexpr bool mcodeIsLiteral(MemberCode mcode) {
+  return mcode == MET || mcode == MEI || mcode == MPT || mcode == MQT;
 }
 
-inline bool mcodeIsProp(MemberCode mcode) {
-  return mcode == MPC || mcode == MPL || mcode == MPT;
+constexpr bool mcodeIsProp(MemberCode mcode) {
+  return mcode == MPC || mcode == MPL || mcode == MPT || mcode == MQT;
 }
 
-inline bool mcodeIsElem(MemberCode mcode) {
+constexpr bool mcodeIsElem(MemberCode mcode) {
   return mcode == MEC || mcode == MEL || mcode == MET || mcode == MEI;
 }
 
-inline bool mcodeMaybeArrayStringKey(MemberCode mcode) {
+constexpr bool mcodeMaybeArrayStringKey(MemberCode mcode) {
   return mcode == MEC || mcode == MEL || mcode == MET;
 }
 
-inline bool mcodeMaybeArrayIntKey(MemberCode mcode) {
+constexpr bool mcodeMaybeArrayIntKey(MemberCode mcode) {
   return mcode == MEC || mcode == MEL || mcode == MEI;
 }
 
-inline bool mcodeMaybeVectorKey(MemberCode mcode) {
+constexpr bool mcodeMaybeVectorKey(MemberCode mcode) {
   return mcode == MEC || mcode == MEL || mcode == MEI;
 }
 

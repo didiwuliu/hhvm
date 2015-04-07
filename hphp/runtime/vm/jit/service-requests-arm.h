@@ -16,15 +16,19 @@
 #ifndef incl_HPHP_JIT_SERVICE_REQUESTS_ARM_H
 #define incl_HPHP_JIT_SERVICE_REQUESTS_ARM_H
 
-namespace HPHP { namespace JIT { namespace ARM {
+namespace HPHP { namespace jit {
+struct Vout;
+namespace arm {
 
-void emitBindJmp(CodeBlock& cb, CodeBlock& stubs, SrcKey dest);
-void emitBindJcc(CodeBlock& cb, CodeBlock& stubs, JIT::ConditionCode cc,
-                 SrcKey dest);
-void emitBindSideExit(CodeBlock& cb, CodeBlock& stubs, SrcKey dest,
-                      JIT::ConditionCode cc);
-int32_t emitBindCall(CodeBlock& cb, CodeBlock& stubs,
-                     SrcKey srcKey, const Func* funcd, int numArgs);
+/*
+ * See service-requests-x64.h for interface documentation.
+ */
+
+TCA emitServiceReqWork(CodeBlock& cb, TCA start, SRFlags flags,
+                       ServiceRequest req, const ServiceReqArgVec& argInfo);
+void emitBindJ(CodeBlock& cb, CodeBlock& frozen, jit::ConditionCode cc,
+               SrcKey dest);
+size_t reusableStubSize();
 
 }}}
 

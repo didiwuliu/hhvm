@@ -47,31 +47,24 @@ bool HHVM_FUNCTION(settype, VRefParam var, const String& type);
 
 Variant HHVM_FUNCTION(print_r, const Variant& expression, bool ret = false);
 Variant HHVM_FUNCTION(var_export, const Variant& expression, bool ret = false);
-void f_var_dump(const Variant& v);
-void f_var_dump(int _argc, const Variant& expression,
-                const Array& _argv /* = null_array */);
+void HHVM_FUNCTION(var_dump,
+                   const Variant& v, const Array& _argv = null_array);
 void HHVM_FUNCTION(debug_zval_dump, const Variant& variable);
 String HHVM_FUNCTION(serialize, const Variant& value);
 Variant HHVM_FUNCTION(unserialize, const String& str,
-                      const Array& class_whitelist = empty_array);
+                      const Array& class_whitelist = empty_array_ref);
 
 ///////////////////////////////////////////////////////////////////////////////
 // variable table
 
-Array HHVM_FUNCTION(get_defined_vars);
-
-#define EXTR_OVERWRITE          0
-#define EXTR_SKIP               1
-#define EXTR_PREFIX_SAME        2
-#define EXTR_PREFIX_ALL         3
-#define EXTR_PREFIX_INVALID     4
-#define EXTR_PREFIX_IF_EXISTS   5
-#define EXTR_IF_EXISTS          6
-#define EXTR_REFS               0x100
-
-int64_t HHVM_FUNCTION(extract, const Array& var_array,
-                               int extract_type = EXTR_OVERWRITE,
-                               const String& prefix = empty_string);
+int64_t constexpr EXTR_OVERWRITE        = 0;
+int64_t constexpr EXTR_SKIP             = 1;
+int64_t constexpr EXTR_PREFIX_SAME      = 2;
+int64_t constexpr EXTR_PREFIX_ALL       = 3;
+int64_t constexpr EXTR_PREFIX_INVALID   = 4;
+int64_t constexpr EXTR_PREFIX_IF_EXISTS = 5;
+int64_t constexpr EXTR_IF_EXISTS        = 6;
+int64_t constexpr EXTR_REFS             = 0x100;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

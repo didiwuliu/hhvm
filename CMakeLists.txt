@@ -1,23 +1,53 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
-PROJECT(hphp C CXX ASM)
 
-IF(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-	message(FATAL_ERROR "HHVM requires a 64bit OS")
-ENDIF()
-
-set(HPHP_HOME "$ENV{HPHP_HOME}")
-if (NOT HPHP_HOME)
-	set(HPHP_HOME "${CMAKE_CURRENT_SOURCE_DIR}")
-endif()
-message("Using HPHP_HOME == ${HPHP_HOME}")
-
-IF(NOT EXISTS "${HPHP_HOME}/CMake/HPHPSetup.cmake")
-	message(FATAL_ERROR "Invalid HPHP_HOME. Set it to the root of your hhvm tree, or run `cmake .` from there.")
-ENDIF()
-
+# includes
 SET(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake" ${CMAKE_MODULE_PATH})
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/HPHPFunctions.cmake")
-include(CheckFunctionExists)
+# package information
+SET(PACKAGE_NAME      "hhvm")
+SET(PACKAGE_VERSION   "3.7.0-dev")
+SET(PACKAGE_STRING    "${PACKAGE_NAME} ${PACKAGE_VERSION}")
+SET(PACKAGE_TARNAME   "${PACKAGE_NAME}-${PACKAGE_VERSION}")
+SET(PACKAGE_BUGREPORT "https://github.com/facebook/hhvm/issues")
 
-add_subdirectory(hphp)
+PROJECT(${PACKAGE_NAME} C CXX ASM)
+
+MARK_AS_ADVANCED(CLEAR CMAKE_INSTALL_PREFIX)
+IF(APPLE)
+  MARK_AS_ADVANCED(CMAKE_OSX_ARCHITECTURES
+    CMAKE_OSX_DEPLOYMENT_TARGET
+    CMAKE_OSX_SYSROOT)
+ENDIF()
+
+# Check architecture OS
+IF(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  MESSAGE(FATAL_ERROR "HHVM requires a 64bit OS")
+ENDIF()
+
+# 3rd party library
+IF(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third-party/CMakeLists.txt")
+  MESSAGE(FATAL_ERROR "third-party/CMakeLists.txt missing. "
+                      "Try updating your submodule with:
+rm -r third-party
+git submodule update --init --recursive
+")
+ENDIF()
+
+INCLUDE("${CMAKE_CURRENT_SOURCE_DIR}/CMake/HPHPFunctions.cmake")
+INCLUDE(CheckFunctionExists)
+
+SET(HPHP_HOME ${CMAKE_CURRENT_SOURCE_DIR})
+SET(TP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third-party")
+
+ADD_SUBDIRECTORY(third-party)
+ADD_SUBDIRECTORY(hphp)
+
+# use GNU install dirs (e.g. lib64 instead of lib)
+INCLUDE(GNUInstallDirs)
+
+# modules / depends
+FILE(GLOB HHVM_CMAKE_FILES "CMake/*.cmake")
+INSTALL(
+  FILES ${HHVM_CMAKE_FILES}
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/hhvm/CMake"
+  COMPONENT dev)

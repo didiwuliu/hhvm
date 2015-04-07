@@ -18,7 +18,8 @@
 #define incl_HPHP_MEM_FILE_H_
 
 #include "hphp/runtime/base/file.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -31,10 +32,10 @@ public:
   DECLARE_RESOURCE_ALLOCATION(MemFile);
 
   explicit MemFile(const String& wrapper_type = null_string,
-                   const String& stream_type = empty_string);
+                   const String& stream_type = empty_string_ref);
   MemFile(const char *data, int64_t len,
           const String& wrapper_type = null_string,
-          const String& stream_type = empty_string);
+          const String& stream_type = empty_string_ref);
   virtual ~MemFile();
 
   CLASSNAME_IS("MemFile");
@@ -52,6 +53,8 @@ public:
   virtual bool eof();
   virtual bool rewind();
   virtual bool flush();
+
+  virtual Array getMetaData();
 
   void unzip();
 

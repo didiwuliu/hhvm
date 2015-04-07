@@ -15,19 +15,36 @@
 */
 
 #include "hphp/runtime/vm/jit/ir-instruction.h"
-#include <algorithm>
-#include "hphp/runtime/vm/jit/ssa-tmp.h"
-#include "hphp/runtime/vm/jit/cse.h"
-#include "hphp/runtime/vm/jit/print.h"
-#include "hphp/runtime/vm/jit/block.h"
 
-namespace HPHP {  namespace JIT {
+#include "hphp/runtime/base/repo-auth-type.h"
+#include "hphp/runtime/base/repo-auth-type-array.h"
+#include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/jit/block.h"
+#include "hphp/runtime/vm/jit/edge.h"
+#include "hphp/runtime/vm/jit/extra-data.h"
+#include "hphp/runtime/vm/jit/ir-instr-table.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/minstr-effects.h"
+#include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/type.h"
+
+#include "hphp/util/arena.h"
+
+#include <folly/Range.h>
+
+#include <algorithm>
+#include <sstream>
+
+namespace HPHP { namespace jit {
+//////////////////////////////////////////////////////////////////////
 
 IRInstruction::IRInstruction(Arena& arena, const IRInstruction* inst, Id id)
   : m_typeParam(inst->m_typeParam)
   , m_op(inst->m_op)
   , m_numSrcs(inst->m_numSrcs)
   , m_numDsts(inst->m_numDsts)
+  , m_hasTypeParam{inst->m_hasTypeParam}
   , m_marker(inst->m_marker)
   , m_id(id)
   , m_srcs(m_numSrcs ? new (arena) SSATmp*[m_numSrcs] : nullptr)
@@ -36,7 +53,7 @@ IRInstruction::IRInstruction(Arena& arena, const IRInstruction* inst, Id id)
   , m_extra(inst->m_extra ? cloneExtra(op(), inst->m_extra, arena)
                           : nullptr)
 {
-  assert(!isTransient());
+  assertx(!isTransient());
   std::copy(inst->m_srcs, inst->m_srcs + inst->m_numSrcs, m_srcs);
   if (hasEdges()) {
     m_edges = new (arena) Edge[2];
@@ -49,41 +66,52 @@ IRInstruction::IRInstruction(Arena& arena, const IRInstruction* inst, Id id)
   }
 }
 
-bool IRInstruction::hasExtra() const {
-  return m_extra;
+std::string IRInstruction::toString() const {
+  std::ostringstream str;
+  print(str, this);
+  return str.str();
 }
 
-// Instructions with ModifiesStack are always naryDst regardless of
-// the inner dest.
+///////////////////////////////////////////////////////////////////////////////
 
-bool IRInstruction::hasDst() const {
-  return opcodeHasFlags(op(), HasDest) &&
-    !opcodeHasFlags(op(), ModifiesStack);
+void IRInstruction::convertToNop() {
+  if (hasEdges()) clearEdges();
+  IRInstruction nop(Nop, marker());
+  m_op           = nop.m_op;
+  m_typeParam    = nop.m_typeParam;
+  m_numSrcs      = nop.m_numSrcs;
+  m_srcs         = nop.m_srcs;
+  m_numDsts      = nop.m_numDsts;
+  m_hasTypeParam = nop.m_hasTypeParam;
+  m_dst          = nop.m_dst;
+  m_extra        = nullptr;
 }
 
-bool IRInstruction::naryDst() const {
-  return opcodeHasFlags(op(), NaryDest | ModifiesStack);
+void IRInstruction::become(IRUnit& unit, IRInstruction* other) {
+  assertx(other->isTransient() || m_numDsts == other->m_numDsts);
+  auto& arena = unit.arena();
+
+  if (hasEdges()) clearEdges();
+
+  m_op = other->m_op;
+  m_typeParam = other->m_typeParam;
+  m_hasTypeParam = other->m_hasTypeParam;
+  m_numSrcs = other->m_numSrcs;
+  m_extra = other->m_extra ? cloneExtra(m_op, other->m_extra, arena) : nullptr;
+  m_srcs = new (arena) SSATmp*[m_numSrcs];
+  std::copy(other->m_srcs, other->m_srcs + m_numSrcs, m_srcs);
+
+  if (hasEdges()) {
+    assertx(other->hasEdges());  // m_op is from other now
+    m_edges = new (arena) Edge[2];
+    m_edges[0].setInst(this);
+    m_edges[1].setInst(this);
+    setNext(other->next());
+    setTaken(other->taken());
+  }
 }
 
-bool IRInstruction::isNative() const {
-  return opcodeHasFlags(op(), CallsNative);
-}
-
-bool IRInstruction::producesReference(int dstNo) const {
-  return opcodeHasFlags(op(), ProducesRC);
-}
-
-bool IRInstruction::canCSE() const {
-  auto canCSE = opcodeHasFlags(op(), CanCSE);
-  // Make sure that instructions that are CSE'able can't consume reference
-  // counts.
-  assert(!canCSE || !consumesReferences());
-  return canCSE;
-}
-
-bool IRInstruction::consumesReferences() const {
-  return opcodeHasFlags(op(), ConsumesRC);
-}
+///////////////////////////////////////////////////////////////////////////////
 
 bool IRInstruction::consumesReference(int srcNo) const {
   if (!consumesReferences()) {
@@ -94,6 +122,8 @@ bool IRInstruction::consumesReference(int srcNo) const {
     case ConcatStrStr:
     case ConcatStrInt:
     case ConcatCellCell:
+    case ConcatStr3:
+    case ConcatStr4:
       // Call a helper that decrefs the first argument
       return srcNo == 0;
 
@@ -105,30 +135,22 @@ bool IRInstruction::consumesReference(int srcNo) const {
     case StRetVal:
     case StLoc:
     case StLocNT:
+    case AFWHBlockOn:
       // Consume the value being stored, not the thing it's being stored into
       return srcNo == 1;
 
-    case StProp:
     case StMem:
-      // StProp|StMem <base>, <offset>, <value>
-      return srcNo == 2;
+      // StMem <base>, <value>
+      return srcNo == 1;
 
     case ArraySet:
     case ArraySetRef:
       // Only consumes the reference to its input array
-      return srcNo == 1;
-
-    case SpillStack:
-      // Inputs 2+ are values to store
-      return srcNo >= 2;
+      return srcNo == 0;
 
     case SpillFrame:
       // Consumes the $this/Class field of the ActRec
-      return srcNo == 3;
-
-    case Call:
-      // Inputs 3+ are arguments to the function
-      return srcNo >= 3;
+      return srcNo == 2;
 
     case ColAddElemC:
       // value at index 2
@@ -141,76 +163,18 @@ bool IRInstruction::consumesReference(int srcNo) const {
     case CheckNullptr:
       return srcNo == 0;
 
-    case CreateAFWHFunc:
+    case CreateAFWH:
+      return srcNo == 4;
+
+    case InitPackedArray:
       return srcNo == 1;
 
-    case CreateAFWHMeth:
-      return srcNo == 2;
+    case InitPackedArrayLoop:
+      return srcNo > 0;
 
     default:
       return true;
   }
-}
-
-bool IRInstruction::mayRaiseError() const {
-  if (!opcodeHasFlags(op(), MayRaiseError)) return false;
-
-  // Some instructions only throw if they do not have a non-catch label.
-  if (is(LdClsPropAddrCached, LdClsPropAddr) &&
-      taken() && !taken()->isCatch()) {
-    return false;
-  }
-
-  return opcodeHasFlags(op(), MayRaiseError);
-}
-
-bool IRInstruction::isEssential() const {
-  return isControlFlow() ||
-         opcodeHasFlags(op(), Essential);
-}
-
-bool IRInstruction::isTerminal() const {
-  return opcodeHasFlags(op(), Terminal);
-}
-
-bool IRInstruction::isPassthrough() const {
-  return opcodeHasFlags(op(), Passthrough);
-}
-
-/*
- * Returns true if the instruction does nothing but load a PHP value from
- * memory, possibly with some straightforward computation beforehand to decide
- * where the load should come from. This specifically excludes opcodes such as
- * CGetProp and ArrayGet that incref their return value.
- */
-bool IRInstruction::isRawLoad() const {
-  switch (m_op) {
-    case LdMem:
-    case LdRef:
-    case LdStack:
-    case LdElem:
-    case LdProp:
-    case LdPackedArrayElem:
-    case Unbox:
-      return true;
-
-    default:
-      return false;
-  }
-}
-
-SSATmp* IRInstruction::getPassthroughValue() const {
-  assert(isPassthrough());
-  assert(is(IncRef, PassFP, PassSP,
-            CheckType, AssertType, AssertNonNull,
-            StRef,
-            ColAddElemC, ColAddNewElemC,
-            Mov));
-  return src(0);
-}
-
-bool IRInstruction::killsSources() const {
-  return opcodeHasFlags(op(), KillsSources);
 }
 
 bool IRInstruction::killsSource(int idx) const {
@@ -219,17 +183,8 @@ bool IRInstruction::killsSource(int idx) const {
     case DecRef:
     case ConvObjToArr:
     case ConvCellToArr:
-    case ConvCellToBool:
-    case ConvObjToDbl:
-    case ConvStrToDbl:
-    case ConvCellToDbl:
-    case ConvObjToInt:
-    case ConvCellToInt:
     case ConvCellToObj:
-    case ConvObjToStr:
-    case ConvResToStr:
-    case ConvCellToStr:
-      assert(idx == 0);
+      assertx(idx == 0);
       return true;
     case ArraySet:
     case ArraySetRef:
@@ -240,216 +195,193 @@ bool IRInstruction::killsSource(int idx) const {
   }
 }
 
-bool IRInstruction::modifiesStack() const {
-  return opcodeHasFlags(op(), ModifiesStack);
-}
-
-SSATmp* IRInstruction::modifiedStkPtr() const {
-  assert(modifiesStack());
-  SSATmp* sp = dst(hasMainDst() ? 1 : 0);
-  assert(sp->isA(Type::StkPtr));
-  return sp;
-}
-
-SSATmp* IRInstruction::previousStkPtr() const {
-  assert(modifiesStack());
-  assert(MInstrEffects::supported(this));
-  auto base = src(minstrBaseIdx(this));
-  assert(base->inst()->is(LdStackAddr));
-  return base->inst()->src(0);
-}
-
-bool IRInstruction::hasMainDst() const {
-  return opcodeHasFlags(op(), HasDest);
-}
-
-SSATmp* IRInstruction::dst(unsigned i) const {
-  if (i == 0 && m_numDsts == 0) return nullptr;
-  assert(i < m_numDsts);
-  assert(naryDst() || i == 0);
-  return hasDst() ? dst() : &m_dst[i];
-}
-
-DstRange IRInstruction::dsts() {
-  return Range<SSATmp*>(m_dst, m_numDsts);
-}
-
-Range<const SSATmp*> IRInstruction::dsts() const {
-  return Range<const SSATmp*>(m_dst, m_numDsts);
-}
-
-void IRInstruction::convertToNop() {
-  if (hasEdges()) clearEdges();
-  IRInstruction nop(Nop, marker());
-  // copy all but m_id, m_edges, m_listNode
-  m_op = nop.m_op;
-  m_typeParam = nop.m_typeParam;
-  m_numSrcs = nop.m_numSrcs;
-  m_srcs = nop.m_srcs;
-  m_numDsts = nop.m_numDsts;
-  m_dst = nop.m_dst;
-  m_extra = nullptr;
-}
-
-void IRInstruction::convertToJmp() {
-  assert(isControlFlow());
-  assert(IMPLIES(block(), &block()->back() == this));
-  m_op = Jmp;
-  m_typeParam.clear();
-  m_numSrcs = 0;
-  m_numDsts = 0;
-  m_srcs = nullptr;
-  m_dst = nullptr;
-  m_extra = nullptr;
-  // Instructions in the simplifier don't have blocks yet.
-  setNext(nullptr);
-}
-
-void IRInstruction::convertToJmp(Block* target) {
-  convertToJmp();
-  setTaken(target);
-}
-
-void IRInstruction::convertToMov() {
-  assert(!isControlFlow());
-  m_op = Mov;
-  m_typeParam.clear();
-  m_extra = nullptr;
-  if (m_numDsts == 1) m_dst->setInstruction(this); // recompute type
-  assert(m_numSrcs == 1);
-  // Instructions in the simplifier don't have dests yet
-  assert((m_numDsts == 1) != isTransient());
-}
-
-void IRInstruction::become(IRUnit& unit, IRInstruction* other) {
-  assert(other->isTransient() || m_numDsts == other->m_numDsts);
-  auto& arena = unit.arena();
-
-  // Copy all but m_id, m_edges[].from, m_listNode, m_marker, and don't clone
-  // dests---the whole point of become() is things still point to us.
-  if (hasEdges() && !other->hasEdges()) {
-    clearEdges();
-  } else if (!hasEdges() && other->hasEdges()) {
-    m_edges = new (arena) Edge[2];
-    setNext(other->next());
-    setTaken(other->taken());
-  }
-  m_op = other->m_op;
-  m_typeParam = other->m_typeParam;
-  m_numSrcs = other->m_numSrcs;
-  m_extra = other->m_extra ? cloneExtra(m_op, other->m_extra, arena) : nullptr;
-  m_srcs = new (arena) SSATmp*[m_numSrcs];
-  std::copy(other->m_srcs, other->m_srcs + m_numSrcs, m_srcs);
-}
+///////////////////////////////////////////////////////////////////////////////
 
 void IRInstruction::setOpcode(Opcode newOpc) {
-  assert(hasEdges() || !JIT::hasEdges(newOpc)); // cannot allocate new edges
-  if (hasEdges() && !JIT::hasEdges(newOpc)) {
+  assertx(hasEdges() || !jit::hasEdges(newOpc)); // cannot allocate new edges
+  if (hasEdges() && !jit::hasEdges(newOpc)) {
     clearEdges();
   }
   m_op = newOpc;
 }
 
-void IRInstruction::addCopy(IRUnit& unit, SSATmp* src, const PhysLoc& dest) {
-  assert(op() == Shuffle);
-  auto data = extra<Shuffle>();
-  auto n = numSrcs();
-  assert(n == data->size && n <= data->cap);
-  if (n == data->cap) {
-    auto cap = data->cap * 2;
-    auto srcs = new (unit.arena()) SSATmp*[cap];
-    auto dests = new (unit.arena()) PhysLoc[cap];
-    for (unsigned i = 0; i < n; i++) {
-      srcs[i] = m_srcs[i];
-      dests[i] = data->dests[i];
+SSATmp* IRInstruction::dst(unsigned i) const {
+  if (i == 0 && m_numDsts == 0) return nullptr;
+  assertx(i < m_numDsts);
+  assertx(naryDst() || i == 0);
+  return hasDst() ? dst() : &m_dst[i];
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// outputType().
+
+namespace {
+
+Type unboxPtr(Type t) {
+  t = t - Type::PtrToBoxedCell;
+  return t.deref().ptr(add_ref(t.ptrKind()));
+}
+
+Type boxPtr(Type t) {
+  auto const rawBoxed = t.deref().unbox().box();
+  auto const noNull = rawBoxed - Type::BoxedUninit;
+  return noNull.ptr(remove_ref(t.ptrKind()));
+}
+
+Type allocObjReturn(const IRInstruction* inst) {
+  switch (inst->op()) {
+    case ConstructInstance:
+      return Type::SubObj(inst->extra<ConstructInstance>()->cls);
+
+    case NewInstanceRaw:
+      return Type::ExactObj(inst->extra<NewInstanceRaw>()->cls);
+
+    case AllocObj:
+      return inst->src(0)->hasConstVal()
+        ? Type::ExactObj(inst->src(0)->clsVal())
+        : Type::Obj;
+
+    default:
+      always_assert(false && "Invalid opcode returning AllocObj");
+  }
+}
+
+Type arrElemReturn(const IRInstruction* inst) {
+  assertx(inst->is(LdStructArrayElem, ArrayGet));
+  assertx(!inst->hasTypeParam() || inst->typeParam() <= Type::Gen);
+
+  auto resultType = inst->hasTypeParam() ? inst->typeParam() : Type::Gen;
+  if (inst->is(ArrayGet)) {
+    resultType = resultType & Type::InitCell;
+  }
+
+  // Elements of a static array are uncounted
+  if (inst->src(0)->isA(Type::StaticArr)) {
+    resultType = resultType & Type::UncountedInit;
+  }
+
+  auto const arrTy = inst->src(0)->type().arrSpec().type();
+  if (!arrTy) return resultType;
+
+  using T = RepoAuthType::Array::Tag;
+
+  switch (arrTy->tag()) {
+    case T::Packed:
+    {
+      auto const idx = inst->src(1);
+      if (idx->hasConstVal() &&
+          idx->intVal() >= 0 && idx->intVal() < arrTy->size()) {
+        return typeFromRAT(arrTy->packedElem(idx->intVal())) & resultType;
+      }
+      return resultType;
     }
-    m_srcs = srcs;
-    data->dests = dests;
-    data->cap = cap;
+    case T::PackedN:
+      return typeFromRAT(arrTy->elemType()) & resultType;
   }
-  m_numSrcs = n + 1;
-  m_srcs[n] = src;
-  data->size = n + 1;
-  data->dests[n] = dest;
+
+  not_reached();
 }
 
-SSATmp* IRInstruction::src(uint32_t i) const {
-  always_assert(i < numSrcs());
-  return m_srcs[i];
+Type thisReturn(const IRInstruction* inst) {
+  auto const func = inst->marker().func();
+
+  // If the function is a cloned closure which may have a re-bound $this which
+  // is not a subclass of the context return an unspecialized type.
+  if (func->hasForeignThis()) return Type::Obj;
+
+  if (auto const cls = func->cls()) {
+    return Type::SubObj(cls);
+  }
+  return Type::Obj;
 }
 
-void IRInstruction::setSrc(uint32_t i, SSATmp* newSrc) {
-  always_assert(i < numSrcs());
-  m_srcs[i] = newSrc;
+Type ctxReturn(const IRInstruction* inst) {
+  return thisReturn(inst) | Type::Cctx;
 }
 
-bool IRInstruction::cseEquals(IRInstruction* inst) const {
-  assert(canCSE());
+Type setElemReturn(const IRInstruction* inst) {
+  assertx(inst->op() == SetElem);
+  auto baseType = inst->src(minstrBaseIdx(inst->op()))->type().strip();
 
-  if (m_op != inst->m_op ||
-      m_typeParam != inst->m_typeParam ||
-      m_numSrcs != inst->m_numSrcs) {
-    return false;
+  // If the base is a Str, the result will always be a CountedStr (or
+  // an exception). If the base might be a str, the result wil be
+  // CountedStr or Nullptr. Otherwise, the result is always Nullptr.
+  if (baseType <= Type::Str) {
+    return Type::CountedStr;
+  } else if (baseType.maybe(Type::Str)) {
+    return Type::CountedStr | Type::Nullptr;
   }
-  for (uint32_t i = 0; i < numSrcs(); i++) {
-    if (src(i) != inst->src(i)) {
-      return false;
-    }
-  }
-  if (hasExtra() && !cseEqualsExtra(op(), m_extra, inst->m_extra)) {
-    return false;
-  }
-  /*
-   * Don't CSE on the edges--it's ok to use the destination of some
-   * earlier guarded load even though the instruction we may have
-   * generated here would've exited to a different trace.
-   *
-   * For example, we use this to cse LdThis regardless of its label.
-   */
-  return true;
+  return Type::Nullptr;
 }
 
-size_t IRInstruction::cseHash() const {
-  assert(canCSE());
+Type builtinReturn(const IRInstruction* inst) {
+  assertx(inst->op() == CallBuiltin);
 
-  size_t srcHash = 0;
-  for (unsigned i = 0; i < numSrcs(); ++i) {
-    srcHash = CSEHash::hashCombine(srcHash, src(i));
+  Type t = inst->typeParam();
+  if (t.isSimpleType() || t == Type::Cell) {
+    return t;
   }
-  if (hasExtra()) {
-    srcHash = CSEHash::hashCombine(srcHash,
-      cseHashExtra(op(), m_extra));
+  if (t.isReferenceType() || t == Type::BoxedCell) {
+    return t | Type::InitNull;
   }
-  if (hasTypeParam()) {
-    srcHash = CSEHash::hashCombine(srcHash, m_typeParam.value());
-  }
-  return CSEHash::hashCombine(srcHash, m_op);
+  not_reached();
 }
 
-std::string IRInstruction::toString() const {
-  std::ostringstream str;
-  print(str, this);
-  return str.str();
-}
+} // namespace
 
-std::string BCMarker::show() const {
-  assert(valid());
-  return folly::format("--- bc {}, spOff {} ({})",
-                       m_sk.offset(),
-                       m_spOff,
-                       m_sk.func()->fullName()->data()).str();
-}
+Type outputType(const IRInstruction* inst, int dstId) {
+  using namespace TypeNames;
+  using TypeNames::TCA;
+#define ND              assertx(0 && "outputType requires HasDest or NaryDest");
+#define D(type)         return type;
+#define DofS(n)         return inst->src(n)->type();
+#define DRefineS(n)     return inst->src(n)->type() & inst->typeParam();
+#define DParamMayRelax  return inst->typeParam();
+#define DParam          return inst->typeParam();
+#define DParamPtr(k)    assertx(inst->typeParam() <= Type::Gen.ptr(Ptr::k)); \
+                        return inst->typeParam();
+#define DUnboxPtr       return unboxPtr(inst->src(0)->type());
+#define DBoxPtr         return boxPtr(inst->src(0)->type());
+#define DAllocObj       return allocObjReturn(inst);
+#define DArrElem        return arrElemReturn(inst);
+#define DArrPacked      return Type::Array(ArrayData::kPackedKind);
+#define DThis           return thisReturn(inst);
+#define DCtx            return ctxReturn(inst);
+#define DMulti          return Type::Bottom;
+#define DSetElem        return setElemReturn(inst);
+#define DBuiltin        return builtinReturn(inst);
+#define DSubtract(n, t) return inst->src(n)->type() - t;
+#define DCns            return Type::Uninit | Type::InitNull | Type::Bool | \
+                               Type::Int | Type::Dbl | Type::Str | Type::Res;
 
-bool BCMarker::valid() const {
-  if (isDummy()) return true;
-  return
-    m_sk.valid() &&
-    m_sk.offset() >= m_sk.func()->base() &&
-    m_sk.offset() < m_sk.func()->past() &&
-    (RuntimeOption::EvalHHIREnableGenTimeInlining ||
-     m_spOff <= m_sk.func()->numSlotsInFrame() + m_sk.func()->maxStackCells());
-  // When inlining is on, we may modify markers to weird values in case reentry
-  // happens.
+#define O(name, dstinfo, srcinfo, flags) case name: dstinfo not_reached();
+
+  switch (inst->op()) {
+    IR_OPCODES
+    default: not_reached();
+  }
+
+#undef O
+
+#undef ND
+#undef D
+#undef DofS
+#undef DRefineS
+#undef DParamMayRelax
+#undef DParam
+#undef DParamPtr
+#undef DUnboxPtr
+#undef DBoxPtr
+#undef DAllocObj
+#undef DArrElem
+#undef DArrPacked
+#undef DThis
+#undef DCtx
+#undef DMulti
+#undef DSetElem
+#undef DBuiltin
+#undef DSubtract
+#undef DCns
 }
 
 }}

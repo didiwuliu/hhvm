@@ -18,34 +18,33 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_NEXT_H_
 
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
+#include "hphp/runtime/vm/bytecode.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdNext : public CmdFlowControl {
-public:
-  CmdNext() :
-      CmdFlowControl(KindOfNext)
-      , m_stepContTag(nullptr)
-      , m_skippingAsyncSuspend(false)
-    {}
+struct CmdNext : CmdFlowControl {
+  CmdNext(): CmdFlowControl(KindOfNext) {}
 
-  virtual void help(DebuggerClient& client);
-  virtual void onSetup(DebuggerProxy& proxy, CmdInterrupt& interrupt);
-  virtual void onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt);
+  void help(DebuggerClient&) override;
+  void onSetup(DebuggerProxy&, CmdInterrupt&) override;
+  void onBeginInterrupt(DebuggerProxy&, CmdInterrupt&) override;
 
 private:
   void stepCurrentLine(CmdInterrupt& interrupt, ActRec* fp, PC pc);
-  void stepAfterAsyncSuspend();
-  bool hasStepCont();
-  bool atStepContOffset(Unit* unit, Offset o);
-  void setupStepCont(ActRec* fp, PC pc);
-  void cleanupStepCont();
-  void* getContinuationTag(ActRec* fp);
+  void stepAfterAwait();
+  bool hasStepResumable();
+  bool atStepResumableOffset(Unit* unit, Offset o);
+  void setupStepSuspend(ActRec* fp, PC pc);
+  void cleanupStepResumable();
+  void* getResumableId(ActRec* fp);
 
-  StepDestination m_stepCont;
-  void* m_stepContTag; // Unique identifier for the continuation we're stepping
-  bool m_skippingAsyncSuspend;
+  StepDestination m_stepResumable;
+
+  // Unique id for the resumable we're stepping.
+  ActRec* m_stepResumableId{nullptr};
+
+  bool m_skippingAwait{false};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

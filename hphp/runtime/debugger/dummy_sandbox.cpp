@@ -19,12 +19,14 @@
 #include <boost/noncopyable.hpp>
 
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/debugger/debugger_hook_handler.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/base/externals.h"
-#include "hphp/runtime/base/hphp-system.h"
+#include "hphp/runtime/base/php-globals.h"
+
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
 
@@ -64,8 +66,7 @@ struct CLISession : private boost::noncopyable {
   ~CLISession() {
     TRACE(2, "CLISession::~CLISession\n");
     Debugger::UnregisterSandbox(g_context->getSandboxId());
-    ThreadInfo::s_threadInfo.getNoCheck()->
-      m_reqInjectionData.setDebugger(false);
+    DebugHookHandler::detach();
     execute_command_line_end(0, false, nullptr);
   }
 };
@@ -84,7 +85,6 @@ void DummySandbox::run() {
       DSandboxInfo sandbox = m_proxy->getSandbox();
       std::string msg;
       if (sandbox.valid()) {
-        GlobalVariables *g = get_global_variables();
         SourceRootInfo sri(sandbox.m_user, sandbox.m_name);
         if (sandbox.m_path.empty()) {
           sandbox.m_path = sri.path();
@@ -93,9 +93,11 @@ void DummySandbox::run() {
           msg = "Invalid sandbox was specified. "
             "PHP files may not be loaded properly.\n";
         } else {
-          auto& server = tvAsVariant(g->nvGet(s__SERVER.get()));
+          auto server = php_global_exchange(s__SERVER, init_null());
           forceToArray(server);
-          sri.setServerVariables(server.toArrRef());
+          Array arr = server.toArrRef();
+          server.unset();
+          php_global_set(s__SERVER, sri.setServerVariables(std::move(arr)));
         }
         Debugger::RegisterSandbox(sandbox);
         g_context->setSandboxId(sandbox.id());
@@ -122,7 +124,7 @@ void DummySandbox::run() {
         g_context->setSandboxId(m_proxy->getDummyInfo().id());
       }
 
-      ti->m_reqInjectionData.setDebugger(true);
+      DebugHookHandler::attach<DebuggerHookHandler>(ti);
       {
         DebuggerDummyEnv dde;
         // This is really the entire point of having the dummy sandbox. This

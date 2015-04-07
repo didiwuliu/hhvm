@@ -35,7 +35,23 @@ namespace HPHP {
  *     virtual void requestInit() {...}
  *     virtual void requestShutdown() {...}
  *   };
- *   static RequestLocal<MyRequestLocalClass> s_data;
+ *   IMPLEMENT_STATIC_REQUEST_LOCAL(MyRequestLocalClass, s_data);
+ *
+ * How to use the request-local macros:
+ *
+ * Use DECLARE_STATIC_REQUEST_LOCAL to declare a *static* class field as
+ * request local:
+ *   class SomeClass {
+ *     DECLARE_STATIC_REQUEST_LOCAL(SomeFieldType, f);
+ *   }
+ *
+ * Use IMPLEMENT_STATIC_REQUEST_LOCAL in the cpp file to implement the field:
+ *   IMPLEMENT_STATIC_REQUEST_LOCAL(SomeFieldType, SomeClass::f);
+ *
+ * The DECLARE_REQUEST_LOCAL and IMPLEMENT_REQUEST_LOCAL macros are provided
+ * for declaring/implementing request locals in the global scope.
+ *
+ * Remember: *Never* write IMPLEMENT_STATIC_REQUEST_LOCAL in a header file.
  */
 
 #if defined(USE_GCC_FAST_TLS)
@@ -48,11 +64,20 @@ struct RequestLocal {
     }
     if (!m_node.m_p->getInited()) {
       m_node.m_p->setInited(true);
-      m_node.m_p->requestInit();
+      try {
+        m_node.m_p->requestInit();
+      } catch (...) {
+        m_node.m_p->setInited(false);
+        throw;
+      }
       // this registration makes sure m_p->requestShutdown() will be called
       g_context->registerRequestEventHandler(m_node.m_p);
     }
     return m_node.m_p;
+  }
+
+  bool getInited() const {
+    return (m_node.m_p != nullptr) && m_node.m_p->getInited();
   }
 
   void create() NEVER_INLINE;
@@ -78,8 +103,7 @@ template<typename T>
 void RequestLocal<T>::create() {
   if (m_node.m_on_thread_exit_fn == nullptr) {
     m_node.m_on_thread_exit_fn = RequestLocal<T>::OnThreadExit;
-    m_node.m_next = ThreadLocalManager::s_manager.getTop();
-    ThreadLocalManager::s_manager.setTop((void*)(&m_node));
+    ThreadLocalManager::PushTop(m_node);
   }
   assert(m_node.m_p == nullptr);
   m_node.m_p = new T();
@@ -103,6 +127,11 @@ template<typename T>
 class RequestLocal {
 public:
   RequestLocal(ThreadLocal<T> & tl) : m_tlsObjects(tl) {}
+
+  bool getInited() const {
+    return !m_tlsObjects.isNull() && m_tlsObjects.get()->getInited();
+  }
+
   T *operator->() const { return get();}
   T &operator*() const { return *get();}
 
@@ -110,7 +139,12 @@ public:
     T *obj = m_tlsObjects.get();
     if (!obj->getInited()) {
       obj->setInited(true);
-      obj->requestInit();
+      try {
+        obj->requestInit();
+      } catch (...) {
+        obj->setInited(false);
+        throw;
+      }
 
       // this registration makes sure obj->requestShutdown() will be called
       g_context->registerRequestEventHandler(obj);
@@ -122,23 +156,6 @@ private:
   ThreadLocal<T> & m_tlsObjects;
 };
 
-/*
- * How to use the request-local macros:
- *
- * Use DECLARE_STATIC_REQUEST_LOCAL to declare a *static* class field as
- * request local:
- *   class SomeClass {
- *     DECLARE_STATIC_REQUEST_LOCAL(SomeFieldType, f);
- *   }
- *
- * Use IMPLEMENT_STATIC_REQUEST_LOCAL in the cpp file to implement the field:
- *   IMPLEMENT_STATIC_REQUEST_LOCAL(SomeFieldType, SomeClass::f);
- *
- * The DECLARE_REQUEST_LOCAL and IMPLEMENT_REQUEST_LOCAL macros are provided
- * for declaring/implementing request locals in the global scope.
- *
- * Remember: *Never* write IMPLEMENT_STATIC_REQUEST_LOCAL in a header file.
- */
 
 #define IMPLEMENT_REQUEST_LOCAL(T,f)     \
   IMPLEMENT_THREAD_LOCAL(T, f ## __tl);  \

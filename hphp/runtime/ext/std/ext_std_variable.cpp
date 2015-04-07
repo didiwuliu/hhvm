@@ -14,12 +14,18 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/ext/std/ext_std_variable.h"
+
+#include <folly/Likely.h>
+
+#include "hphp/util/logger.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/util/logger.h"
+#include "hphp/runtime/base/zend-functions.h"
+#include "hphp/runtime/ext/xdebug/ext_xdebug.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/server/http-protocol.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -31,6 +37,7 @@ const StaticString
   s_integer("integer"),
   s_int("int"),
   s_float("float"),
+  s_double("double"),
   s_string("string"),
   s_object("object"),
   s_array("array"),
@@ -69,6 +76,7 @@ bool HHVM_FUNCTION(settype, VRefParam var, const String& type) {
   else if (type == s_integer) var = var.toInt64();
   else if (type == s_int    ) var = var.toInt64();
   else if (type == s_float  ) var = var.toDouble();
+  else if (type == s_double ) var = var.toDouble();
   else if (type == s_string ) var = var.toString();
   else if (type == s_array  ) var = var.toArray();
   else if (type == s_object ) var = var.toObject();
@@ -155,20 +163,29 @@ Variant HHVM_FUNCTION(var_export, const Variant& expression,
   return res;
 }
 
-void f_var_dump(const Variant& v) {
-  VariableSerializer vs(VariableSerializer::Type::VarDump, 0, 2);
+static ALWAYS_INLINE void do_var_dump(VariableSerializer vs,
+                                      const Variant& expression) {
   // manipulate maxCount to match PHP behavior
-  if (!v.isObject()) {
+  if (!expression.isObject()) {
     vs.incMaxCount();
   }
-  vs.serialize(v, false);
+  vs.serialize(expression, false);
 }
 
-void f_var_dump(int _argc, const Variant& expression,
-                const Array& _argv /* = null_array */) {
-  f_var_dump(expression);
-  for (int i = 0; i < _argv.size(); i++) {
-    f_var_dump(_argv[i]);
+void HHVM_FUNCTION(var_dump, const Variant& expression,
+                             const Array& _argv /*=null_array */) {
+  if (UNLIKELY(XDEBUG_GLOBAL(OverloadVarDump) &&
+               XDEBUG_GLOBAL(DefaultEnable))) {
+    HHVM_FN(xdebug_var_dump)(expression, _argv);
+    return;
+  }
+
+  VariableSerializer vs(VariableSerializer::Type::VarDump, 0, 2);
+  do_var_dump(vs, expression);
+
+  auto sz = _argv.size();
+  for (int i = 0; i < sz; i++) {
+    do_var_dump(vs, _argv[i]);
   }
 }
 
@@ -179,45 +196,46 @@ void HHVM_FUNCTION(debug_zval_dump, const Variant& variable) {
 
 String HHVM_FUNCTION(serialize, const Variant& value) {
   switch (value.getType()) {
-  case KindOfUninit:
-  case KindOfNull:
-    return "N;";
-  case KindOfBoolean:
-    return value.getBoolean() ? "b:1;" : "b:0;";
-  case KindOfInt64: {
-    StringBuffer sb;
-    sb.append("i:");
-    sb.append(value.getInt64());
-    sb.append(';');
-    return sb.detach();
+    case KindOfUninit:
+    case KindOfNull:
+      return "N;";
+    case KindOfBoolean:
+      return value.getBoolean() ? "b:1;" : "b:0;";
+    case KindOfInt64: {
+      StringBuffer sb;
+      sb.append("i:");
+      sb.append(value.getInt64());
+      sb.append(';');
+      return sb.detach();
+    }
+    case KindOfStaticString:
+    case KindOfString: {
+      StringData *str = value.getStringData();
+      StringBuffer sb;
+      sb.append("s:");
+      sb.append(str->size());
+      sb.append(":\"");
+      sb.append(str->data(), str->size());
+      sb.append("\";");
+      return sb.detach();
+    }
+    case KindOfResource:
+      return "i:0;";
+    case KindOfArray: {
+      ArrayData *arr = value.getArrayData();
+      if (arr->empty()) return "a:0:{}";
+      // fall-through
+    }
+    case KindOfDouble:
+    case KindOfObject: {
+      VariableSerializer vs(VariableSerializer::Type::Serialize);
+      return vs.serialize(value, true);
+    }
+    case KindOfRef:
+    case KindOfClass:
+      break;
   }
-  case KindOfStaticString:
-  case KindOfString: {
-    StringData *str = value.getStringData();
-    StringBuffer sb;
-    sb.append("s:");
-    sb.append(str->size());
-    sb.append(":\"");
-    sb.append(str->data(), str->size());
-    sb.append("\";");
-    return sb.detach();
-  }
-  case KindOfArray: {
-    ArrayData *arr = value.getArrayData();
-    if (arr->empty()) return "a:0:{}";
-    // fall-through
-  }
-  case KindOfObject:
-  case KindOfResource:
-  case KindOfDouble: {
-    VariableSerializer vs(VariableSerializer::Type::Serialize);
-    return vs.serialize(value, true);
-  }
-  default:
-    assert(false);
-    break;
-  }
-  return "";
+  not_reached();
 }
 
 Variant HHVM_FUNCTION(unserialize, const String& str,
@@ -228,69 +246,182 @@ Variant HHVM_FUNCTION(unserialize, const String& str,
 ///////////////////////////////////////////////////////////////////////////////
 // variable table
 
-Array HHVM_FUNCTION(get_defined_vars) {
+ALWAYS_INLINE
+static Array get_defined_vars() {
   VarEnv* v = g_context->getVarEnv();
-  if (v) {
-    return v->getDefinedVariables();
-  } else {
-    return Array::Create();
-  }
+  return v ? v->getDefinedVariables() : empty_array();
 }
 
-int64_t HHVM_FUNCTION(extract, const Array& var_array,
-                               int extract_type /* = EXTR_OVERWRITE */,
-                               const String& prefix /* = "" */) {
+Array HHVM_FUNCTION(get_defined_vars) {
+  raise_disallowed_dynamic_call("extract should not be called dynamically");
+  return get_defined_vars();
+}
+
+// accessible as __SystemLib\\get_defined_vars
+Array HHVM_FUNCTION(SystemLib_get_defined_vars) {
+  return get_defined_vars();
+}
+
+const StaticString
+  s_GLOBALS("GLOBALS"),
+  s_this("this");
+
+static const Func* arGetContextFunc(const ActRec* ar) {
+  if (ar == nullptr) {
+    return nullptr;
+  }
+  if (ar->m_func->isPseudoMain() || ar->m_func->isBuiltin()) {
+    // Pseudomains inherit the context of their caller
+    auto const context = g_context.getNoCheck();
+    ar = context->getPrevVMState(ar);
+    while (ar != nullptr &&
+             (ar->m_func->isPseudoMain() || ar->m_func->isBuiltin())) {
+      ar = context->getPrevVMState(ar);
+    }
+    if (ar == nullptr) {
+      return nullptr;
+    }
+  }
+  return ar->m_func;
+}
+
+static bool modify_extract_name(VarEnv* v,
+                                String& name,
+                                int64_t extract_type,
+                                const String& prefix) {
+  switch (extract_type) {
+  case EXTR_SKIP:
+    if (v->lookup(name.get()) != nullptr) {
+      return false;
+    }
+    break;
+  case EXTR_IF_EXISTS:
+    if (v->lookup(name.get()) == nullptr) {
+      return false;
+    } else {
+      goto namechecks;
+    }
+    break;
+  case EXTR_PREFIX_SAME:
+    if (v->lookup(name.get()) != nullptr) {
+      name = prefix + "_" + name;
+    } else {
+      goto namechecks;
+    }
+    break;
+  case EXTR_PREFIX_ALL:
+    name = prefix + "_" + name;
+    break;
+  case EXTR_PREFIX_INVALID:
+    if (!is_valid_var_name(name.get()->data(), name.size())) {
+      name = prefix + "_" + name;
+    } else {
+      goto namechecks;
+    }
+    break;
+  case EXTR_PREFIX_IF_EXISTS:
+    if (v->lookup(name.get()) == nullptr) {
+      return false;
+    }
+    name = prefix + "_" + name;
+    break;
+  case EXTR_OVERWRITE:
+    namechecks:
+    if (name == s_GLOBALS) {
+      return false;
+    }
+    if (name == s_this) {
+      // Only disallow $this when inside a non-static method, or a static method
+      // that has defined $this (matches Zend)
+      CallerFrame cf;
+      const Func* func = arGetContextFunc(cf());
+
+      if (func && func->isMethod() && v->lookup(s_this.get()) != nullptr) {
+        return false;
+      }
+    }
+  default:
+    break;
+  }
+
+  // skip invalid variable names, as in PHP
+  return is_valid_var_name(name.get()->data(), name.size());
+}
+
+ALWAYS_INLINE static
+int64_t extract_impl(VRefParam vref_array,
+                     int extract_type /* = EXTR_OVERWRITE */,
+                     const String& prefix /* = "" */) {
   bool reference = extract_type & EXTR_REFS;
   extract_type &= ~EXTR_REFS;
 
-  VarEnv* v = g_context->getVarEnv();
-  if (!v) return 0;
+  if (!vref_array.wrapped().isArray()) {
+    raise_warning("extract() expects parameter 1 to be array");
+    return 0;
+  }
+
+  VMRegAnchor _;
+  auto const varEnv = g_context->getVarEnv();
+  if (!varEnv) return 0;
+
+  if (UNLIKELY(reference)) {
+    auto& arr = vref_array.wrapped().toArrRef();
+    int count = 0;
+    for (ArrayIter iter(arr); iter; ++iter) {
+      String name = iter.first();
+      if (!modify_extract_name(varEnv, name, extract_type, prefix)) continue;
+      g_context->bindVar(name.get(), arr.lvalAt(name).asTypedValue());
+      ++count;
+    }
+    return count;
+  }
+
+  auto const var_array = vref_array.wrapped().toArray();
   int count = 0;
   for (ArrayIter iter(var_array); iter; ++iter) {
     String name = iter.first();
-    StringData* nameData = name.get();
-    switch (extract_type) {
-      case EXTR_SKIP:
-        if (v->lookup(nameData) != NULL) {
-          continue;
-        }
-        break;
-      case EXTR_IF_EXISTS:
-        if (v->lookup(nameData) == NULL) {
-          continue;
-        }
-        break;
-      case EXTR_PREFIX_SAME:
-        if (v->lookup(nameData) != NULL) {
-          name = prefix + "_" + name;
-        }
-        break;
-      case EXTR_PREFIX_ALL:
-        name = prefix + "_" + name;
-        break;
-      case EXTR_PREFIX_INVALID:
-        if (!is_valid_var_name(nameData->data(), nameData->size())) {
-          name = prefix + "_" + name;
-        }
-        break;
-      case EXTR_PREFIX_IF_EXISTS:
-        if (v->lookup(nameData) == NULL) {
-          continue;
-        }
-        name = prefix + "_" + name;
-        break;
-      default:
-        break;
-    }
-    nameData = name.get();
-    // skip invalid variable names, as in PHP
-    if (!is_valid_var_name(nameData->data(), nameData->size())) {
-      continue;
-    }
-    g_context->setVar(nameData, iter.nvSecond(), reference);
-    count++;
+    if (!modify_extract_name(varEnv, name, extract_type, prefix)) continue;
+    g_context->setVar(name.get(), iter.secondRef().asTypedValue());
+    ++count;
   }
   return count;
+}
+
+int64_t HHVM_FUNCTION(extract, VRefParam vref_array,
+                      int64_t extract_type /* = EXTR_OVERWRITE */,
+                      const String& prefix /* = "" */) {
+  raise_disallowed_dynamic_call("extract should not be called dynamically");
+  return extract_impl(vref_array, extract_type, prefix);
+}
+
+int64_t HHVM_FUNCTION(SystemLib_extract,
+                      VRefParam vref_array,
+                      int64_t extract_type = EXTR_OVERWRITE,
+                      const String& prefix = "") {
+  return extract_impl(vref_array, extract_type, prefix);
+}
+
+static void parse_str_impl(const String& str, VRefParam arr) {
+  Array result = Array::Create();
+  HttpProtocol::DecodeParameters(result, str.data(), str.size());
+  if (!arr.isReferenced()) {
+    HHVM_FN(SystemLib_extract)(result);
+    return;
+  }
+  arr = result;
+}
+
+void HHVM_FUNCTION(parse_str,
+                   const String& str,
+                   VRefParam arr /* = null */) {
+  raise_disallowed_dynamic_call("parse_str should not be called dynamically");
+  parse_str_impl(str, arr);
+}
+
+void HHVM_FUNCTION(SystemLib_parse_str,
+                   const String& str,
+                   VRefParam arr /* = null */) {
+  parse_str_impl(str, arr);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -333,10 +464,15 @@ void StandardExtension::initVariable() {
   HHVM_FE(print_r);
   HHVM_FE(var_export);
   HHVM_FE(debug_zval_dump);
+  HHVM_FE(var_dump);
   HHVM_FE(serialize);
   HHVM_FE(unserialize);
   HHVM_FE(get_defined_vars);
+  HHVM_FALIAS(__SystemLib\\get_defined_vars, SystemLib_get_defined_vars);
   HHVM_FE(extract);
+  HHVM_FE(parse_str);
+  HHVM_FALIAS(__SystemLib\\extract, SystemLib_extract);
+  HHVM_FALIAS(__SystemLib\\parse_str, SystemLib_parse_str);
 
   loadSystemlib("std_variable");
 }

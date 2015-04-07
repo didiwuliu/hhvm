@@ -17,6 +17,10 @@
 #include "hphp/runtime/server/rpc-request-handler.h"
 
 #include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/server/server-stats.h"
@@ -25,15 +29,25 @@
 #include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/server/request-uri.h"
 #include "hphp/runtime/ext/json/ext_json.h"
+#include "hphp/runtime/ext/std/ext_std_output.h"
+#include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/process.h"
 #include "hphp/runtime/server/satellite-server.h"
+#include "hphp/system/constants.h"
 
-#include "folly/ScopeGuard.h"
+#include <folly/ScopeGuard.h>
 
 using std::set;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+IMPLEMENT_THREAD_LOCAL(AccessLog::ThreadData,
+                       RPCRequestHandler::s_accessLogThreadData);
+
+AccessLog RPCRequestHandler::s_accessLog(
+  &(RPCRequestHandler::getAccessLogThreadData));
 
 RPCRequestHandler::RPCRequestHandler(int timeout, bool info)
   : RequestHandler(timeout),
@@ -41,11 +55,10 @@ RPCRequestHandler::RPCRequestHandler(int timeout, bool info)
     m_reset(false),
     m_logResets(info),
     m_returnEncodeType(ReturnEncodeType::Json) {
-  initState();
 }
 
 RPCRequestHandler::~RPCRequestHandler() {
-  cleanupState();
+  if (vmStack().isAllocated()) cleanupState();
 }
 
 void RPCRequestHandler::initState() {
@@ -71,12 +84,13 @@ void RPCRequestHandler::initState() {
 }
 
 void RPCRequestHandler::cleanupState() {
-  hphp_context_exit(m_context, false);
+  hphp_context_exit();
   hphp_session_exit();
 }
 
 bool RPCRequestHandler::needReset() const {
   return (m_reset ||
+          !vmStack().isAllocated() ||
           m_serverInfo->alwaysReset() ||
           ((time(0) - m_lastReset) > m_serverInfo->getMaxDuration()) ||
           (m_requestsSinceReset >= m_serverInfo->getMaxRequest()));
@@ -84,7 +98,7 @@ bool RPCRequestHandler::needReset() const {
 
 void RPCRequestHandler::handleRequest(Transport *transport) {
   if (needReset()) {
-    cleanupState();
+    if (vmStack().isAllocated()) cleanupState();
     initState();
   }
   ++m_requestsSinceReset;
@@ -92,7 +106,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   ExecutionProfiler ep(ThreadInfo::RuntimeFunctions);
 
   Logger::OnNewRequest();
-  HttpRequestHandler::GetAccessLog().onNewRequest();
+  GetAccessLog().onNewRequest();
   m_context->setTransport(transport);
   transport->enableCompression();
 
@@ -103,6 +117,23 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   StackTraceNoHeap::ExtraLoggingClearer clearer;
   StackTraceNoHeap::AddExtraLogging("RPC-URL", transport->getUrl());
 
+  // Checking functions whitelist
+  const std::set<std::string> &functions = m_serverInfo->getFunctions();
+  if (!functions.empty()) {
+    auto iter = functions.find(transport->getCommand());
+    if (iter == functions.end()) {
+      transport->sendString("Forbidden", 403);
+      transport->onSendEnd();
+      GetAccessLog().log(transport, nullptr);
+      /*
+       * HPHP logs may need to access data in ServerStats, so we have to
+       * clear the hashtable after writing the log entry.
+       */
+      ServerStats::Reset();
+      return;
+    }
+  }
+
   // authentication
   const std::set<std::string> &passwords = m_serverInfo->getPasswords();
   if (!passwords.empty()) {
@@ -110,7 +141,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
     if (iter == passwords.end()) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
-      HttpRequestHandler::GetAccessLog().log(transport, nullptr);
+      GetAccessLog().log(transport, nullptr);
       /*
        * HPHP logs may need to access data in ServerStats, so we have to
        * clear the hashtable after writing the log entry.
@@ -123,7 +154,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
     if (!password.empty() && password != transport->getParam("auth")) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
-      HttpRequestHandler::GetAccessLog().log(transport, nullptr);
+      GetAccessLog().log(transport, nullptr);
       /*
        * HPHP logs may need to access data in ServerStats, so we have to
        * clear the hashtable after writing the log entry.
@@ -145,14 +176,15 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   if (vhost->disabled()) {
     transport->sendString("Virtual host disabled.", 404);
     transport->onSendEnd();
-    HttpRequestHandler::GetAccessLog().log(transport, vhost);
+    GetAccessLog().log(transport, vhost);
     return;
   }
 
   auto& reqData = ThreadInfo::s_threadInfo->m_reqInjectionData;
   reqData.setTimeout(vhost->getRequestTimeoutSeconds(getDefaultTimeout()));
   SCOPE_EXIT {
-    reqData.setTimeout(0);
+    reqData.setTimeout(0);  // can't throw when you pass zero
+    reqData.setCPUTimeout(0);
     reqData.reset();
   };
 
@@ -174,7 +206,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   // record request for debugging purpose
   std::string tmpfile = HttpProtocol::RecordRequest(transport);
   bool ret = executePHPFunction(transport, sourceRootInfo, returnEncodeType);
-  HttpRequestHandler::GetAccessLog().log(transport, vhost);
+  GetAccessLog().log(transport, vhost);
   /*
    * HPHP logs may need to access data in ServerStats, so we have to
    * clear the hashtable after writing the log entry.
@@ -184,11 +216,11 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
 }
 
 void RPCRequestHandler::abortRequest(Transport *transport) {
-  HttpRequestHandler::GetAccessLog().onNewRequest();
+  GetAccessLog().onNewRequest();
   const VirtualHost *vhost = HttpProtocol::GetVirtualHost(transport);
   assert(vhost);
   transport->sendString("Service Unavailable", 503);
-  HttpRequestHandler::GetAccessLog().log(transport, vhost);
+  GetAccessLog().log(transport, vhost);
 }
 
 const StaticString
@@ -205,9 +237,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     ServerStatsHelper ssh("input");
     RequestURI reqURI(rpcFunc);
     HttpProtocol::PrepareSystemVariables(transport, reqURI, sourceRootInfo);
-
-    GlobalVariables *g = get_global_variables();
-    tvAsVariant(g->nvGet(s__ENV.get())).toArrRef().set(s_HPHP_RPC, 1);
+    auto env = php_global(s__ENV);
+    env.toArrRef().set(s_HPHP_RPC, 1);
+    php_global_set(s__ENV, std::move(env));
   }
 
   bool isFile = rpcFunc.rfind('.') != std::string::npos;
@@ -294,7 +326,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
         rpcFile = (std::string) canonicalize_path(rpcFile, "", 0);
         rpcFile = getSourceFilename(rpcFile, sourceRootInfo);
         ret = hphp_invoke(m_context, rpcFile, false, Array(), uninit_null(),
-                          reqInitFunc, reqInitDoc, error, errorMsg, runOnce);
+                          reqInitFunc, reqInitDoc, error, errorMsg, runOnce,
+                          false /* warmupOnly */,
+                          false /* richErrorMessage */);
       }
       // no need to do the initialization for a second time
       reqInitFunc.clear();
@@ -302,7 +336,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     }
     if (ret && !rpcFunc.empty()) {
       ret = hphp_invoke(m_context, rpcFunc, true, params, ref(funcRet),
-                        reqInitFunc, reqInitDoc, error, errorMsg);
+                        reqInitFunc, reqInitDoc, error, errorMsg,
+                        true /* once */,
+                        false /* warmupOnly */,
+                        false /* richErrorMessage */);
     }
     if (ret) {
       bool serializeFailed = false;
@@ -313,7 +350,7 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
                  returnEncodeType == ReturnEncodeType::Serialize);
           try {
             response = (returnEncodeType == ReturnEncodeType::Json) ?
-                       HHVM_FN(json_encode)(funcRet) :
+                       HHVM_FN(json_encode)(funcRet).toString() :
                        f_serialize(funcRet);
           } catch (...) {
             serializeFailed = true;
@@ -325,7 +362,7 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
           response =
             HHVM_FN(json_encode)(
               make_map_array(s_output, m_context->obDetachContents(),
-                                      s_return, HHVM_FN(json_encode)(funcRet)));
+                             s_return, HHVM_FN(json_encode)(funcRet)));
           break;
         case 3: response = f_serialize(funcRet); break;
       }
@@ -358,7 +395,11 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
   ServerStats::LogPage(isFile ? rpcFile : rpcFunc, code);
 
   m_context->onShutdownPostSend();
-  m_context->obClean(); // in case postsend/cleanup output something
+  // in case postsend/cleanup output something
+  // PHP5 always provides _START.
+  m_context->obClean(k_PHP_OUTPUT_HANDLER_START |
+                     k_PHP_OUTPUT_HANDLER_CLEAN |
+                     k_PHP_OUTPUT_HANDLER_END);
   m_context->restoreSession();
   return !error;
 }

@@ -19,7 +19,9 @@
 #include <atomic>
 #include <cstdlib>
 #include <cinttypes>
+#include <string>
 #include <boost/variant.hpp>
+#include <folly/Range.h>
 
 #include "hphp/runtime/base/types.h"
 
@@ -30,7 +32,7 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-namespace HPHP { namespace RDS {
+namespace HPHP { namespace rds {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -43,25 +45,31 @@ namespace HPHP { namespace RDS {
  * each thread as new data is allocated.
  *
  * The RDS starts with a small header that is statically layed out,
- * followed by the main segment, which is initialized to zero at the
- * start of each request.  The next section, contains "persistent"
- * data, which is data that retains the same values across requests.
+ * followed by the main "normal" segment, which is initialized to zero
+ * at the start of each request.  The next section, called "local",
+ * contains unshared but still persistent data---this is data that is
+ * local to a thread but retains its value across requests.  The final
+ * section contains shared "persistent" data, which is data that
+ * retains the same values across requests.
  *
- * The persistent segment is implemented       RDS Layout:
- * by mapping the same physical pages to
- * different virtual addresses, so they          +------------+ <-- tl_base
- * are all accessible from the                   |  Header    |
- * per-thread RDS base.  The normal              +------------+
- * region is perhaps analogous to .bss,          |            |
- * while the persistent region is                |  Normal    |
- * analagous to .rodata.                         |    region  |
- *                                               |            |
- * When we're running in C++, the base           +------------+
- * of RDS is available via a thread              | Persistent | higher
- * local exported from this module               |     region |   addresses
- * (tl_base).  When running in                   +------------+
- * JIT-compiled code, a machine register
- * is reserved to always point at the base of RDS.
+ * The shared persistent segment is           RDS Layout:
+ * implemented by mapping the same physical
+ * pages to different virtual addresses, so      +-------------+ <-- tl_base
+ * are all accessible from the                   |  Header     |
+ * per-thread RDS base.  The normal              +-------------+
+ * region is perhaps analogous to .bss,          |             |
+ * while the persistent region is                |  Normal     |
+ * analogous to .rodata, and the local region    |    region   |
+ * is similar to .data.                          |             | growing higher
+ *                                               +-------------+  vvv
+ * When we're running in C++, the base of RDS    | \ \ \ \ \ \ |
+ * is available via a thread local exported      +-------------+  ^^^
+ * from this module (tl_base).  When running     |  Local      | growing lower
+ * in JIT-compiled code, a machine register      |    region   |
+ * is reserved to always point at the base of    +-------------+
+ * RDS.                                          | Persistent  |
+ *                                               |     region  | higher
+ *                                               +-------------+   addresses
  *
  *
  * Allocation/linking API:
@@ -71,17 +79,17 @@ namespace HPHP { namespace RDS {
  *   allocated space is associated with some unique key that allows it
  *   to be re-found for any new attempts to allocate that symbol.
  *
- *   Anonymous allocations are created with RDS::alloc.  Non-anonymous
+ *   Anonymous allocations are created with rds::alloc.  Non-anonymous
  *   allocations can be created in two ways:
  *
- *     RDS::bind(Symbol) uses an RDS-internal link table to find if
+ *     rds::bind(Symbol) uses an RDS-internal link table to find if
  *     there is an existing handle for the given symbol.
  *
- *     RDS::Link<T>::bind allows the caller to make use of the
+ *     rds::Link<T>::bind allows the caller to make use of the
  *     uniqueness of other runtime structure (e.g. the Class
  *     structure) to avoid having a special key and needing to do
  *     lookups in the internal RDS link table.  The "key" for the
- *     allocation is the RDS::Link<> object itself.
+ *     allocation is the rds::Link<> object itself.
  *
  *   Finally, you can allocate anonymous single bits at a time with
  *   allocBit().
@@ -110,42 +118,20 @@ void flush();
 
 /*
  * Return the number of bytes that have been allocated from either
- * persistent or non-persistent RDS.
+ * persistent, local, or non-persistent RDS.
  */
 size_t usedBytes();
+size_t usedLocalBytes();
 size_t usedPersistentBytes();
+
+folly::Range<const char*> normalSection();
+folly::Range<const char*> localSection();
+folly::Range<const char*> persistentSection();
 
 /*
  * The thread-local pointer to the base of RDS.
  */
 extern __thread void* tl_base;
-
-//////////////////////////////////////////////////////////////////////
-
-/*
- * Statically layed-out header that goes at the front of RDS.
- */
-struct Header {
-  /*
-   * Surprise flags.  May be written by other threads.  At various
-   * points, the runtime will check whether this word is non-zero, and
-   * if so go to a slow path to handle unusual conditions (e.g. OOM).
-   */
-  std::atomic<ssize_t> conditionFlags;
-};
-
-/*
- * Access to the statically layed out header.
- */
-Header* header();
-
-/*
- * Values for dynamically defined constants are stored as key value
- * pairs in an array, accessible here.
- */
-Array& s_constants();
-
-constexpr ptrdiff_t kConditionFlagsOff   = offsetof(Header, conditionFlags);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -183,19 +169,29 @@ struct StaticProp { const StringData* name; };
 struct StaticMethod  { const StringData* name; };
 struct StaticMethodF { const StringData* name; };
 
-typedef boost::variant< StaticLocal
-                      , ClsConstant
-                      , StaticProp
-                      , StaticMethod
-                      , StaticMethodF
-                      > Symbol;
+/*
+ * Profiling translations may store various kinds of junk under
+ * symbols that are keyed on translation id.  These generally should
+ * go in Mode::Local or Mode::Persistent, depending on the use case.
+ */
+struct Profile { TransID transId;
+                 Offset bcOff;
+                 const StringData* name; };
+
+using Symbol = boost::variant< StaticLocal
+                             , ClsConstant
+                             , StaticProp
+                             , StaticMethod
+                             , StaticMethodF
+                             , Profile
+                             >;
 
 //////////////////////////////////////////////////////////////////////
 
-enum class Mode { Normal, Persistent };
+enum class Mode { Normal, Local, Persistent };
 
 /*
- * RDS::Link<T> is a thin, typed wrapper around an RDS::Handle.
+ * rds::Link<T> is a thin, typed wrapper around an rds::Handle.
  *
  * Note that nothing prevents using non-POD types with this.  But
  * nothing here is going to run the constructor.  (In the
@@ -245,9 +241,11 @@ struct Link {
   bool bound() const;
 
   /*
-   * Access to the underlying RDS::Handle.
+   * Access to the underlying rds::Handle.
    */
   Handle handle() const;
+
+  bool isPersistent() const;
 
   /*
    * For access from the JIT only.
@@ -273,6 +271,16 @@ template<class T, size_t Align = alignof(T)>
 Link<T> bind(Symbol key, Mode mode = Mode::Normal);
 
 /*
+ * Try to bind to a symbol in RDS, returning an unbound link if the
+ * Symbol isn't already allocated in RDS.  Mode and alignment are not
+ * specified---if the symbol is already bound, these are already
+ * fixed.  The `T' must be the same `T' that the symbol is mapped to,
+ * if it's already mapped.
+ */
+template<class T>
+Link<T> attach(Symbol key);
+
+/*
  * Allocate anonymous memory from RDS.
  *
  * The memory is not keyed on any Symbol, so the handle in the
@@ -285,7 +293,7 @@ Link<T> alloc(Mode mode = Mode::Normal);
  * Allocate a single anonymous bit from non-persistent RDS.  The bit
  * can be manipulated with testAndSetBit().
  *
- * Note: the returned integer is *not* an RDS::Handle.
+ * Note: the returned integer is *not* an rds::Handle.
  */
 size_t allocBit();
 bool testAndSetBit(size_t bit);
@@ -293,19 +301,38 @@ bool testAndSetBit(size_t bit);
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Dereference an un-typed RDS::Handle.
+ * Dereference an un-typed rds::Handle, optionally specifying a
+ * specific RDS base to use.
  */
-template<class T>
-T& handleToRef(Handle h) {
-  void* vp = static_cast<char*>(tl_base) + h;
-  return *static_cast<T*>(vp);
-}
+template<class T> T& handleToRef(Handle h);
+template<class T> T& handleToRef(void* base, Handle h);
 
 /*
  * Returns: whether the supplied handle is from the persistent RDS
  * region.
  */
 bool isPersistentHandle(Handle handle);
+
+/*
+ * Used to record information about the rds handle h in the
+ * perf-data-pid.map (if enabled).
+ * The type indicates the type of entry (eg StaticLocal), and the
+ * msg identifies this particular entry (eg function-name:local-name)
+ */
+void recordRds(Handle h, size_t size,
+               const std::string& type, const std::string& msg);
+void recordRds(Handle h, size_t size, const Symbol& sym);
+
+/*
+ * Return a list of all the tl_bases for any threads that are using RDS
+ */
+std::vector<void*> allTLBases();
+
+/*
+ * Values for dynamically defined constants are stored as key value
+ * pairs in an array, accessible here.
+ */
+Array& s_constants();
 
 //////////////////////////////////////////////////////////////////////
 

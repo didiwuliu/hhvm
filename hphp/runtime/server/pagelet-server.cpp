@@ -15,14 +15,18 @@
 */
 
 #include "hphp/runtime/server/pagelet-server.h"
+
+#include <folly/experimental/Singleton.h>
+
 #include "hphp/runtime/server/transport.h"
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/upload.h"
 #include "hphp/runtime/server/job-queue-vm-stack.h"
+#include "hphp/runtime/server/host-health-monitor.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/ext/ext_server.h"
+#include "hphp/runtime/ext/server/ext_server.h"
 #include "hphp/util/job-queue.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
@@ -126,10 +130,13 @@ void PageletTransport::removeHeaderImpl(const char *name) {
 }
 
 void PageletTransport::sendImpl(const void *data, int size, int code,
-                      bool chunked) {
+                                bool chunked, bool eom) {
   m_response.append((const char*)data, size);
   if (code) {
     m_code = code;
+  }
+  if (eom) {
+    onSendEndImpl();
   }
 }
 
@@ -209,7 +216,7 @@ String PageletTransport::getResults(
         long long nanosecs = (timeout_ms % 1000) * 1000000;
         if (!wait(seconds, nanosecs)) {
           code = -1;
-          return "";
+          return empty_string();
         }
       } else {
         wait();
@@ -291,7 +298,7 @@ struct PageletWorker
       } else {
         timeout = 0;
       }
-      HttpRequestHandler(timeout).handleRequest(job);
+      HttpRequestHandler(timeout).run(job);
       job->decRefCount();
     } catch (...) {
       Logger::Error("HttpRequestHandler leaked exceptions");
@@ -327,7 +334,7 @@ public:
 private:
   PageletTransport *m_job;
 };
-IMPLEMENT_OBJECT_ALLOCATION(PageletTask)
+IMPLEMENT_RESOURCE_ALLOCATION(PageletTask)
 
 ///////////////////////////////////////////////////////////////////////////////
 // implementing PageletServer
@@ -350,6 +357,9 @@ void PageletServer::Restart() {
          RuntimeOption::PageletServerThreadDropCacheTimeoutSeconds,
          RuntimeOption::PageletServerThreadDropStack,
          nullptr);
+      auto monitor = folly::Singleton<HostHealthMonitor>::get();
+      monitor->subscribe(s_dispatcher);
+      monitor->start();
     }
     Logger::Info("pagelet server started");
     s_dispatcher->start();
@@ -379,19 +389,18 @@ Resource PageletServer::TaskStart(
   {
     Lock l(s_dispatchMutex);
     if (!s_dispatcher) {
-      return null_resource;
+      return Resource();
     }
     if (RuntimeOption::PageletServerQueueLimit > 0 &&
         s_dispatcher->getQueuedJobs() >
         RuntimeOption::PageletServerQueueLimit) {
       pageletOverflowCounter->addValue(1);
-      return null_resource;
+      return Resource();
     }
   }
-  PageletTask *task = NEWOBJ(PageletTask)(url, headers, remote_host, post_data,
-                                          get_uploaded_files(), files,
-                                          timeoutSeconds);
-  Resource ret(task);
+  auto task = makeSmartPtr<PageletTask>(url, headers, remote_host, post_data,
+                                        get_uploaded_files(), files,
+                                        timeoutSeconds);
   PageletTransport *job = task->getJob();
   Lock l(s_dispatchMutex);
   if (s_dispatcher) {
@@ -403,14 +412,14 @@ Resource PageletServer::TaskStart(
     }
 
     s_dispatcher->enqueue(job);
-    return ret;
+    g_context->incrPageletTasksStarted();
+    return Resource(std::move(task));
   }
-  return null_resource;
+  return Resource();
 }
 
 int64_t PageletServer::TaskStatus(const Resource& task) {
-  PageletTask *ptask = task.getTyped<PageletTask>();
-  PageletTransport *job = ptask->getJob();
+  PageletTransport *job = cast<PageletTask>(task)->getJob();
   if (!job->isPipelineEmpty()) {
     return PAGELET_READY;
   }
@@ -422,7 +431,7 @@ int64_t PageletServer::TaskStatus(const Resource& task) {
 
 String PageletServer::TaskResult(const Resource& task, Array &headers, int &code,
                                  int64_t timeout_ms) {
-  PageletTask *ptask = task.getTyped<PageletTask>();
+  auto ptask = cast<PageletTask>(task);
   return ptask->getJob()->getResults(headers, code, timeout_ms);
 }
 

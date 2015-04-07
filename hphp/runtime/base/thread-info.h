@@ -18,8 +18,8 @@
 
 #include <cinttypes>
 #include <map>
+#include <functional>
 
-#include "hphp/util/portability.h"
 #include "hphp/util/thread-local.h"
 #include "hphp/runtime/base/request-injection-data.h"
 
@@ -28,6 +28,7 @@ namespace HPHP {
 struct MemoryManager;
 struct Profiler;
 struct CodeCoverage;
+struct DebugHookHandler;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -40,67 +41,106 @@ struct ThreadInfo {
     NetworkIO,
   };
 
-  static void GetExecutionSamples(std::map<Executing, int> &counts);
+  static void GetExecutionSamples(std::map<Executing, int>& counts);
+  static void ExecutePerThread(std::function<void(ThreadInfo*)> f);
   static DECLARE_THREAD_LOCAL_NO_CHECK(ThreadInfo, s_threadInfo);
 
-  RequestInjectionData m_reqInjectionData;
+  /*
+   * This is the amount of "slack" in stack usage checks - if the stack pointer
+   * gets within this distance from the end (minus overhead), throw an infinite
+   * recursion exception.
+   */
+  static constexpr int StackSlack = 1024 * 1024;
 
-  // For infinite recursion detection.  m_stacklimit is the lowest
-  // address the stack can grow to.
-  char *m_stacklimit;
+  /*
+   * Since this is often used as a static global, we want to do anything that
+   * might try to access ThreadInfo::s_threadInfo here instead of in the
+   * constructor.
+   */
+  void init();
 
-  // Either null, or populated by initialization of ThreadInfo as an
-  // approximation of the highest address of the current thread's
-  // stack.
-  static __thread char* t_stackbase;
+  void onSessionInit();
+  void onSessionExit();
 
-  // This is the amount of "slack" in stack usage checks - if the
-  // stack pointer gets within this distance from the end (minus
-  // overhead), throw an infinite recursion exception.
-  static const int StackSlack = 1024 * 1024;
+  /*
+   * Setting and clearing the pending exception.
+   */
+  void setPendingException(Exception*);
+  void clearPendingException();
 
-  MemoryManager* m_mm;
-
-  // This pointer is set by ProfilerFactory
-  Profiler *m_profiler;
-  CodeCoverage *m_coverage;
-
-  Executing m_executing;
-
-  // A C++ exception which will be thrown by the next surprise check.
-  Exception* m_pendingException;
+  static bool valid(ThreadInfo*);
 
   ThreadInfo();
   ~ThreadInfo();
 
-  void onSessionInit();
-  void onSessionExit();
-  void setPendingException(Exception* e);
-  void clearPendingException();
+  ////////////////////////////////////////////////////////////////////
 
-  static bool valid(ThreadInfo* info);
+  RequestInjectionData m_reqInjectionData;
+
+  /* This pointer is set by ProfilerFactory. */
+  Profiler* m_profiler{nullptr};
+
+  CodeCoverage* m_coverage{nullptr};
+
+  /* Set by DebugHookHandler::attach(). */
+  DebugHookHandler* m_debugHookHandler{nullptr};
+
+  /* A C++ exception which will be thrown by the next surprise check. */
+  Exception* m_pendingException{nullptr};
+
+  Executing m_executing{Idling};
 };
 
 //////////////////////////////////////////////////////////////////////
 
+/*
+ * Access to the running thread's ThreadInfo and RequestInjectionData.
+ */
+
+inline ThreadInfo& TI() {
+  return *ThreadInfo::s_threadInfo;
+}
+
+inline RequestInjectionData& RID() {
+  return TI().m_reqInjectionData;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void raise_infinite_recursion_error();
+
 inline void* stack_top_ptr() {
-  DECLARE_STACK_POINTER(sp);
-  return sp;
+  char marker;
+
+  // gcc warns about directly returning pointers to local variables.
+  auto to_trick_gcc = static_cast<void*>(&marker);
+  return to_trick_gcc;
 }
 
-inline bool stack_in_bounds(ThreadInfo*& info) {
-  return stack_top_ptr() >= info->m_stacklimit;
+inline bool stack_in_bounds() {
+  return uintptr_t(stack_top_ptr()) >= s_stackLimit + ThreadInfo::StackSlack;
 }
 
-// The ThreadInfo pointer itself must be from the current stack frame.
-inline void check_recursion(ThreadInfo*& info) {
-  extern void throw_infinite_recursion_exception();
-  if (!stack_in_bounds(info)) {
-    throw_infinite_recursion_exception();
-  }
+/*
+ * Raises an error when infinite recursion is detected.
+ *
+ * It's recommended to use check_recursion_throw() instead of this, as raising
+ * an error will use much more stack than throwing an exception, making this
+ * have a higher chance of blowing out what little stack the thread has left.
+ */
+inline void check_recursion_error() {
+  if (LIKELY(stack_in_bounds())) return;
+  raise_infinite_recursion_error();
 }
 
-ssize_t check_request_surprise(ThreadInfo *info);
+/* Throws exception when infinite recursion is detected. */
+inline void check_recursion_throw() {
+  if (LIKELY(stack_in_bounds())) return;
+  throw Exception("Maximum stack size reached");
+}
+
+ssize_t check_request_surprise();
+ssize_t check_request_surprise_unlikely();
 
 //////////////////////////////////////////////////////////////////////
 

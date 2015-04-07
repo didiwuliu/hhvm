@@ -15,7 +15,10 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_out.h"
+
+#include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/vm-regs.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -79,7 +82,7 @@ void CmdOut::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   cleanupStepOuts();
   int depth = decCount();
   if (depth == 0) {
-    PC pc = g_context->getPC();
+    PC pc = vmpc();
     // Step over PopR following a call
     if (*reinterpret_cast<const Op*>(pc) == Op::PopR) {
       m_skippingOverPopR = true;

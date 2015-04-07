@@ -3,59 +3,18 @@
     "consts": [
     ],
     "funcs": [
-        {
-            "name": "asio_get_current_context_idx",
-            "desc": "Get index of the current scheduler context, or 0 if there is none",
-            "flags": [
-            ],
-            "return": {
-                "type": "Int32",
-                "desc": "An index of the current scheduler context"
-            },
-            "args": [
-            ]
-        },
-        {
-            "name": "asio_get_running_in_context",
-            "desc": "Get currently running wait handle in a context specified by its index",
-            "flags": [
-            ],
-            "return": {
-                "type": "Object",
-                "desc": "An AsyncFunctionWaitHandle that is running in a specified context"
-            },
-            "args": [
-                {
-                    "name": "ctx_idx",
-                    "type": "Int32",
-                    "desc": "An index of a specified context"
-                }
-            ]
-        },
-        {
-            "name": "asio_get_running",
-            "desc": "Get currently running wait handle, or null if there is none",
-            "flags": [
-            ],
-            "return": {
-                "type": "Object",
-                "desc": "An AsyncFunctionWaitHandle that is running in the current context"
-            },
-            "args": [
-            ]
-        }
     ],
     "classes": [
         {
-            "name": "WaitHandle",
-            "desc": "A wait handle representing asynchronous operation",
+            "name": "HH\\AsyncGenerator",
+            "desc": "A generator that can be iterated asynchronously",
             "flags": [
-                "IsAbstract",
-                "IsCppAbstract",
-                "NoDefaultSweep"
+                "IsFinal",
+                "NoDefaultSweep",
+                "CppCustomDelete"
             ],
             "ifaces": [
-                "Awaitable"
+                "HH\\AsyncKeyedIterator"
             ],
             "funcs": [
                 {
@@ -70,9 +29,78 @@
                     ]
                 },
                 {
-                    "name": "setOnJoinCallback",
-                    "desc": "Set callback for when join() is called",
+                    "name": "next",
+                    "desc": "Continue asynchronous iteration",
                     "flags": [
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "send",
+                    "desc": "Continue asynchronous iteration with value",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "value",
+                            "type": "Variant",
+                            "desc": "A value to be received by yield expression"
+                        }
+                    ]
+                },
+                {
+                    "name": "raise",
+                    "desc": "Continue asynchronous iteration with raised exception",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "exception",
+                            "type": "Object",
+                            "desc": "An exception to be thrown by yield expression"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "HH\\WaitHandle",
+            "desc": "A wait handle representing asynchronous operation",
+            "flags": [
+                "IsAbstract",
+                "IsCppAbstract",
+                "NoDefaultSweep"
+            ],
+            "ifaces": [
+                "HH\\Awaitable"
+            ],
+            "funcs": [
+                {
+                    "name": "__construct",
+                    "flags": [
+                        "IsPrivate"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "setOnIOWaitEnterCallback",
+                    "desc": "Set callback for when the scheduler enters I/O wait",
+                    "flags": [
+                        "IsFinal",
                         "IsStatic",
                         "HipHopSpecific"
                     ],
@@ -81,7 +109,45 @@
                     },
                     "args": [
                         {
-                            "name": "on_join_cb",
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when I/O wait is entered"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnIOWaitExitCallback",
+                    "desc": "Set callback for when the scheduler exits I/O wait",
+                    "flags": [
+                        "IsFinal",
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when I/O wait is exited"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnJoinCallback",
+                    "desc": "Set callback for when join() is called",
+                    "flags": [
+                        "IsFinal",
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
                             "type": "Variant",
                             "desc": "A Closure to be called on join()"
                         }
@@ -91,6 +157,7 @@
                     "name": "getWaitHandle",
                     "desc": "Return this wait handle (for Awaitable interface)",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Object"
@@ -102,6 +169,7 @@
                     "name": "import",
                     "desc": "Import this wait handle to the current scheduler context",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": null
@@ -113,6 +181,20 @@
                     "name": "join",
                     "desc": "Wait until this wait handle is finished and return its result (operates in a new scheduler context)",
                     "flags": [
+                        "IsFinal"
+                    ],
+                    "return": {
+                        "type": "Variant",
+                        "desc": "A result of the operation represented by given wait handle"
+                    },
+                    "args": [
+                    ]
+                },
+                {
+                    "name": "result",
+                    "desc": "Return the wait handle's result if it is already finished (and valid), throw an exception otherwise",
+                    "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Variant",
@@ -125,6 +207,7 @@
                     "name": "isFinished",
                     "desc": "Check if this wait handle finished (succeeded or failed)",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Boolean",
@@ -137,6 +220,7 @@
                     "name": "isSucceeded",
                     "desc": "Check if this wait handle succeeded",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Boolean",
@@ -149,6 +233,7 @@
                     "name": "isFailed",
                     "desc": "Check if this wait handle failed",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Boolean",
@@ -161,6 +246,7 @@
                     "name": "getID",
                     "desc": "Get unique ID of this wait handle (amongst existing ones)",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Int64",
@@ -173,6 +259,7 @@
                     "name": "getName",
                     "desc": "Get name of the operation behind this wait handle",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "String",
@@ -185,6 +272,7 @@
                     "name": "getExceptionIfFailed",
                     "desc": "Get exception if this wait handle has failed, or null",
                     "flags": [
+                        "IsFinal"
                     ],
                     "return": {
                         "type": "Object",
@@ -198,12 +286,11 @@
             ]
         },
         {
-            "name": "StaticWaitHandle",
-            "parent": "WaitHandle",
+            "name": "HH\\StaticWaitHandle",
+            "parent": "HH\\WaitHandle",
             "desc": "A wait handle that is always finished",
             "flags": [
-                "IsAbstract",
-                "IsCppAbstract",
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
@@ -223,54 +310,8 @@
             ]
         },
         {
-            "name": "StaticResultWaitHandle",
-            "parent": "StaticWaitHandle",
-            "desc": "A wait handle representing static result",
-            "flags": [
-                "NoDefaultSweep"
-            ],
-            "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                }
-            ],
-            "consts": [
-            ]
-        },
-        {
-            "name": "StaticExceptionWaitHandle",
-            "parent": "StaticWaitHandle",
-            "desc": "A wait handle representing statically failed operation",
-            "flags": [
-                     "NoDefaultSweep"
-            ],
-            "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                }
-            ],
-            "consts": [
-            ]
-        },
-        {
-            "name": "WaitableWaitHandle",
-            "parent": "WaitHandle",
+            "name": "HH\\WaitableWaitHandle",
+            "parent": "HH\\WaitHandle",
             "desc": "A wait handle that can be waited upon",
             "flags": [
                 "IsAbstract",
@@ -279,20 +320,10 @@
             ],
             "funcs": [
                 {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
-                {
                     "name": "getContextIdx",
                     "desc": "Get index of the scheduler context this wait handle operates in",
                     "flags": [
+                      "IsFinal"
                     ],
                     "return": {
                         "type": "Int32",
@@ -305,6 +336,7 @@
                     "name": "getCreator",
                     "desc": "Get wait handle that created this wait handle",
                     "flags": [
+                      "IsFinal"
                     ],
                     "return": {
                         "type": "Object",
@@ -317,10 +349,11 @@
                     "name": "getParents",
                     "desc": "Get wait handles blocked on this wait handle",
                     "flags": [
+                      "IsFinal"
                     ],
                     "return": {
                         "type": "VariantVec",
-                        "desc": "An array of BlockableWaitHandles blocked on this wait handle"
+                        "desc": "An array of WaitableWaitHandles blocked on this wait handle"
                     },
                     "args": [
                     ]
@@ -329,6 +362,7 @@
                     "name": "getDependencyStack",
                     "desc": "Get the dependency stack for this wait handle",
                     "flags": [
+                      "IsFinal"
                     ],
                     "return": {
                         "type": "VariantVec",
@@ -342,9 +376,9 @@
             ]
         },
         {
-            "name": "BlockableWaitHandle",
-            "parent": "WaitableWaitHandle",
-            "desc": "A wait handle that can be blocked on a dependency",
+            "name": "HH\\ResumableWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
+            "desc": "A wait handle that can resume execution of PHP code",
             "flags": [
                 "IsAbstract",
                 "IsCppAbstract",
@@ -352,43 +386,10 @@
             ],
             "funcs": [
                 {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                }
-            ],
-            "consts": [
-            ]
-        },
-        {
-            "name": "AsyncFunctionWaitHandle",
-            "parent": "BlockableWaitHandle",
-            "desc": "A wait handle representing asynchronous execution of async function",
-            "flags": [
-                "NoDefaultSweep"
-            ],
-            "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
-                {
                     "name": "setOnCreateCallback",
-                    "desc": "Set callback to be called when an AsyncFunctionWaitHandle is created",
+                    "desc": "Set callback to be called when a ResumableWaitHandle is created",
                     "flags": [
+                        "IsFinal",
                         "IsStatic",
                         "HipHopSpecific"
                     ],
@@ -397,9 +398,9 @@
                     },
                     "args": [
                         {
-                            "name": "on_create_cb",
+                            "name": "callback",
                             "type": "Variant",
-                            "desc": "A Closure to be called when an AsyncFunctionWaitHandle is created"
+                            "desc": "A Closure to be called when a ResumableWaitHandle is created"
                         }
                     ]
                 },
@@ -407,6 +408,7 @@
                     "name": "setOnAwaitCallback",
                     "desc": "Set callback to be called when an async function blockingly awaits",
                     "flags": [
+                        "IsFinal",
                         "IsStatic",
                         "HipHopSpecific"
                     ],
@@ -415,7 +417,7 @@
                     },
                     "args": [
                         {
-                            "name": "on_await_cb",
+                            "name": "callback",
                             "type": "Variant",
                             "desc": "A Closure to be called when an async function blockingly await"
                         }
@@ -423,8 +425,9 @@
                 },
                 {
                     "name": "setOnSuccessCallback",
-                    "desc": "Set callback to be called when an async function finishes successfully",
+                    "desc": "Set callback to be called when a ResumableWaitHandle finishes successfully",
                     "flags": [
+                        "IsFinal",
                         "IsStatic",
                         "HipHopSpecific"
                     ],
@@ -433,16 +436,17 @@
                     },
                     "args": [
                         {
-                            "name": "on_success_cb",
+                            "name": "callback",
                             "type": "Variant",
-                            "desc": "A Closure to be called when an async function finishes"
+                            "desc": "A Closure to be called when a ResumableWaitHandle finishes"
                         }
                     ]
                 },
                 {
                     "name": "setOnFailCallback",
-                    "desc": "Set callback to be called when an async function fails",
+                    "desc": "Set callback to be called when a ResumableWaitHandle fails",
                     "flags": [
+                        "IsFinal",
                         "IsStatic",
                         "HipHopSpecific"
                     ],
@@ -451,37 +455,9 @@
                     },
                     "args": [
                         {
-                            "name": "on_fail_cb",
+                            "name": "callback",
                             "type": "Variant",
-                            "desc": "A Closure to be called when an async function fails"
-                        }
-                    ]
-                },
-                {
-                    "name": "getPrivData",
-                    "desc": "Get user's private data",
-                    "flags": [
-                    ],
-                    "return": {
-                        "type": "Object",
-                        "desc": "An Object with user's private data"
-                    },
-                    "args": [
-                    ]
-                },
-                {
-                    "name": "setPrivData",
-                    "desc": "Set user's private data",
-                    "flags": [
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                        {
-                            "name": "data",
-                            "type": "Object",
-                            "desc": "An Object with user's private data"
+                            "desc": "A Closure to be called when a ResumableWaitHandle fails"
                         }
                     ]
                 }
@@ -490,10 +466,36 @@
             ]
         },
         {
-            "name": "GenArrayWaitHandle",
-            "parent": "BlockableWaitHandle",
-            "desc": "A wait handle representing an array of asynchronous operations",
+            "name": "HH\\AsyncFunctionWaitHandle",
+            "parent": "HH\\ResumableWaitHandle",
+            "desc": "A wait handle representing asynchronous execution of async function",
             "flags": [
+                "IsFinal",
+                "NoDefaultSweep",
+                "CppCustomDelete"
+            ],
+            "funcs": [
+                {
+                    "name": "__construct",
+                    "flags": [
+                        "IsPrivate"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                    ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "HH\\AsyncGeneratorWaitHandle",
+            "parent": "HH\\ResumableWaitHandle",
+            "desc": "A wait handle representing asynchronous execution of async generator",
+            "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
@@ -507,7 +509,106 @@
                     },
                     "args": [
                     ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "HH\\AwaitAllWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
+            "desc": "A wait handle that waits for a list of other wait handles",
+            "flags": [
+                "IsFinal",
+                "NoDefaultSweep",
+                "CppCustomDelete"
+            ],
+            "funcs": [
+                {
+                    "name": "fromArray",
+                    "desc": "Create a wait handle that waits for a given array of dependencies",
+                    "flags": [
+                        "IsStatic"
+                    ],
+                    "return": {
+                        "type": "Object",
+                        "desc": "A WaitHandle that will wait for a given array of dependencies"
+                    },
+                    "args": [
+                        {
+                            "name": "dependencies",
+                            "type": "VariantMap",
+                            "desc": "An Array of dependencies to wait for"
+                        }
+                    ]
                 },
+                {
+                    "name": "fromMap",
+                    "desc": "Create a wait handle that waits for a given Map of dependencies",
+                    "flags": [
+                        "IsStatic"
+                    ],
+                    "return": {
+                        "type": "Object",
+                        "desc": "A WaitHandle that will wait for a given Map of dependencies"
+                    },
+                    "args": [
+                        {
+                            "name": "dependencies",
+                            "type": "Variant",
+                            "desc": "A Map of dependencies to wait for"
+                        }
+                    ]
+                },
+                {
+                    "name": "fromVector",
+                    "desc": "Create a wait handle that waits for a given Vector of dependencies",
+                    "flags": [
+                        "IsStatic"
+                    ],
+                    "return": {
+                        "type": "Object",
+                        "desc": "A WaitHandle that will wait for a given Vector of dependencies"
+                    },
+                    "args": [
+                        {
+                            "name": "dependencies",
+                            "type": "Variant",
+                            "desc": "A Vector of dependencies to wait for"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnCreateCallback",
+                    "desc": "Set callback for when a AwaitAllWaitHandle is created",
+                    "flags": [
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called on creation"
+                        }
+                    ]
+                }
+            ],
+            "consts": [
+            ]
+        },
+        {
+            "name": "HH\\GenArrayWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
+            "desc": "A wait handle representing an array of asynchronous operations",
+            "flags": [
+                "IsFinal",
+                "NoDefaultSweep"
+            ],
+            "funcs": [
                 {
                     "name": "create",
                     "desc": "Create a wait handle that waits for a given array of dependencies",
@@ -538,7 +639,7 @@
                     },
                     "args": [
                         {
-                            "name": "on_create_cb",
+                            "name": "callback",
                             "type": "Variant",
                             "desc": "A Closure to be called on creation"
                         }
@@ -549,24 +650,14 @@
             ]
         },
         {
-            "name": "GenMapWaitHandle",
-            "parent": "BlockableWaitHandle",
+            "name": "HH\\GenMapWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
             "desc": "A wait handle representing a map of asynchronous operations",
             "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
                 {
                     "name": "create",
                     "desc": "Create a wait handle that waits for a given map of dependencies",
@@ -597,7 +688,7 @@
                     },
                     "args": [
                         {
-                            "name": "on_create_cb",
+                            "name": "callback",
                             "type": "Variant",
                             "desc": "A Closure to be called on creation"
                         }
@@ -608,24 +699,14 @@
             ]
         },
         {
-            "name": "GenVectorWaitHandle",
-            "parent": "BlockableWaitHandle",
+            "name": "HH\\GenVectorWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
             "desc": "A wait handle representing a vector of asynchronous operations",
             "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
                 {
                     "name": "create",
                     "desc": "Create a wait handle that waits for a given vector of dependencies",
@@ -656,7 +737,7 @@
                     },
                     "args": [
                         {
-                            "name": "on_create_cb",
+                            "name": "callback",
                             "type": "Variant",
                             "desc": "A Closure to be called on creation"
                         }
@@ -667,51 +748,35 @@
             ]
         },
         {
-            "name": "SetResultToRefWaitHandle",
-            "parent": "BlockableWaitHandle",
-            "desc": "A wait handle proxy that sets result to a given reference",
+            "name": "HH\\ConditionWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
+            "desc": "A wait handle representing a condition variable waiting for a notification",
             "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
                 {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
-                {
                     "name": "create",
-                    "desc": "Create a wait handle that stores result of a dependency to a given reference",
+                    "desc": "Create a wait handle that waits for a notification",
                     "flags": [
                         "IsStatic"
                     ],
                     "return": {
                         "type": "Object",
-                        "desc": "A WaitHandle that will store the result of a dependency to a given reference"
+                        "desc": "A WaitHandle that will wait for a notification"
                     },
                     "args": [
                         {
-                            "name": "wait_handle",
-                            "type": "Object",
-                            "desc": "A wait handle to wait for"
-                        },
-                        {
-                            "name": "ref",
+                            "name": "child",
                             "type": "Variant",
-                            "desc": "A reference to set the result to",
-                            "ref": true
+                            "desc": "A WaitHandle representing job responsible for notifying the condition variable"
                         }
                     ]
                 },
                 {
                     "name": "setOnCreateCallback",
-                    "desc": "Set callback for when a SetResultToRefWaitHandle is created",
+                    "desc": "Set callback for when a ConditionWaitHandle is created",
                     "flags": [
                         "IsStatic",
                         "HipHopSpecific"
@@ -721,9 +786,41 @@
                     },
                     "args": [
                         {
-                            "name": "on_create_cb",
+                            "name": "callback",
                             "type": "Variant",
                             "desc": "A Closure to be called on creation"
+                        }
+                    ]
+                },
+                {
+                    "name": "succeed",
+                    "desc": "Notify the condition variable and mark the ConditionWaitHandle as succeeded",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "result",
+                            "type": "Variant",
+                            "desc": "A result to be set"
+                        }
+                    ]
+                },
+                {
+                    "name": "fail",
+                    "desc": "Notify the condition variable and mark the ConditionWaitHandle as failed",
+                    "flags": [
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "exception",
+                            "type": "Variant",
+                            "desc": "An exception to be set"
                         }
                     ]
                 }
@@ -732,24 +829,14 @@
             ]
         },
         {
-            "name": "RescheduleWaitHandle",
-            "parent": "WaitableWaitHandle",
+            "name": "HH\\RescheduleWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
             "desc": "A wait handle that succeeds with null once desired scheduling priority is eligible for execution",
             "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
                 {
                     "name": "create",
                     "desc": "Create a wait handle that succeeds once desired scheduling priority is eligible for execution",
@@ -788,49 +875,14 @@
             ]
         },
         {
-            "name": "SessionScopedWaitHandle",
-            "parent": "WaitableWaitHandle",
-            "desc": "A wait handle whose execution is session-managed",
-            "flags": [
-                "IsAbstract",
-                "IsCppAbstract",
-                "NoDefaultSweep"
-            ],
-            "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                }
-            ],
-            "consts": [
-            ]
-        },
-        {
-            "name": "SleepWaitHandle",
-            "parent": "SessionScopedWaitHandle",
+            "name": "HH\\SleepWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
             "desc": "A wait handle that succeeds with null after the desired timeout expires",
             "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
-                {
-                    "name": "__construct",
-                    "flags": [
-                        "IsPrivate"
-                    ],
-                    "return": {
-                        "type": null
-                    },
-                    "args": [
-                    ]
-                },
                 {
                     "name": "create",
                     "desc": "Create a wait handle that succeeds after the desired timeout expires",
@@ -848,31 +900,113 @@
                             "desc": "Non-negative number of microseconds to sleep for"
                         }
                     ]
+                },
+                {
+                    "name": "setOnCreateCallback",
+                    "desc": "Set callback to be called when a SleepWaitHandle is created",
+                    "flags": [
+                        "IsFinal",
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when a SleepWaitHandle is created"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnSuccessCallback",
+                    "desc": "Set callback to be called when a SleepWaitHandle finishes successfully",
+                    "flags": [
+                        "IsFinal",
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when a SleepWaitHandle finishes"
+                        }
+                    ]
                 }
             ],
             "consts": [
             ]
         },
         {
-            "name": "ExternalThreadEventWaitHandle",
-            "parent": "SessionScopedWaitHandle",
+            "name": "HH\\ExternalThreadEventWaitHandle",
+            "parent": "HH\\WaitableWaitHandle",
             "desc": "A wait handle that synchronizes against C++ operation in external thread",
             "bases": [
                 "Sweepable"
             ],
             "flags": [
+                "IsFinal",
                 "NoDefaultSweep"
             ],
             "funcs": [
                 {
-                    "name": "__construct",
+                    "name": "setOnCreateCallback",
+                    "desc": "Set callback to be called when an ExternalThreadEventWaitHandle is created",
                     "flags": [
-                        "IsPrivate"
+                        "IsStatic",
+                        "HipHopSpecific"
                     ],
                     "return": {
                         "type": null
                     },
                     "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when an ExternalThreadEventWaitHandle is created"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnSuccessCallback",
+                    "desc": "Set callback to be called when an ExternalThreadEventWaitHandle finishes successfully",
+                    "flags": [
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when an ExternalThreadEventWaitHandle finishes"
+                        }
+                    ]
+                },
+                {
+                    "name": "setOnFailCallback",
+                    "desc": "Set callback to be called when an ExternalThreadEventWaitHandle fails",
+                    "flags": [
+                        "IsStatic",
+                        "HipHopSpecific"
+                    ],
+                    "return": {
+                        "type": null
+                    },
+                    "args": [
+                        {
+                            "name": "callback",
+                            "type": "Variant",
+                            "desc": "A Closure to be called when an ExternalThreadEventWaitHandle fails"
+                        }
                     ]
                 }
             ]

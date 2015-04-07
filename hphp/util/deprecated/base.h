@@ -28,7 +28,6 @@
 
 #include <errno.h>
 #include <string.h>
-#include "hphp/runtime/base/strings.h" // XXX
 #include <unistd.h>
 #include <poll.h>
 #include <netinet/in.h>
@@ -60,12 +59,10 @@
 #include <exception>
 #include <functional>
 
-#include <boost/lexical_cast.hpp>
 #include <boost/interprocess/sync/interprocess_upgradable_mutex.hpp>
 #include <boost/foreach.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <boost/type_traits.hpp>
 
 #include "hphp/util/compilation-flags.h"
 #include "hphp/util/hash.h"
@@ -79,7 +76,6 @@
 namespace HPHP {
   using std::string;
   using std::vector;
-  using boost::lexical_cast;
   using std::dynamic_pointer_cast;
   using std::static_pointer_cast;
 }

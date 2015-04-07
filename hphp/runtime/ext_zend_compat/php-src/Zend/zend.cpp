@@ -73,12 +73,12 @@ ZEND_API void zend_make_printable_zval(zval *expr, zval *expr_copy, int *use_cop
 }
 
 #if defined(__GNUC__) && __GNUC__ >= 3 && !defined(__INTEL_COMPILER) && !defined(DARWIN) && !defined(__hpux) && !defined(_AIX) && !defined(__osf__)
-void zend_error_noreturn(int type, const char *format, ...) __attribute__ ((alias("zend_error"),noreturn));
+void zend_error_noreturn(int type, const char *format, ...) __attribute__ ((__alias__("zend_error"),noreturn));
 #endif
 
 ZEND_API void zend_error(int type, const char *format, ...) {
   va_list ap;
   va_start(ap, format);
-  HPHP::raise_message(static_cast<HPHP::ErrorConstants::ErrorModes>(type), format, ap);
+  HPHP::raise_message(static_cast<HPHP::ErrorMode>(type), format, ap);
   va_end(ap);
 }

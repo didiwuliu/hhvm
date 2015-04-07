@@ -1,21 +1,17 @@
 %{
-#ifdef XHPAST2_PARSER
-#include "hphp/parser/xhpast2/parser.h"
-#else
-#include "hphp/compiler/parser/parser.h"
-#endif
-#include <boost/lexical_cast.hpp>
-#include "hphp/util/text-util.h"
-#include "hphp/util/logger.h"
-
 // macros for bison
 #define YYSTYPE HPHP::HPHP_PARSER_NS::Token
-#define YYSTYPE_IS_TRIVIAL 1
+#define YYSTYPE_IS_TRIVIAL false
 #define YYLTYPE HPHP::Location
-#define YYLTYPE_IS_TRIVIAL 1
+#define YYLTYPE_IS_TRIVIAL true
 #define YYERROR_VERBOSE
 #define YYINITDEPTH 500
 #define YYLEX_PARAM _p
+
+#include "hphp/compiler/parser/parser.h"
+#include <folly/Conv.h>
+#include "hphp/util/text-util.h"
+#include "hphp/util/logger.h"
 
 #ifdef yyerror
 #undef yyerror
@@ -28,14 +24,14 @@
 #define YYRHSLOC(Rhs, K) ((Rhs)[K])
 #define YYLLOC_DEFAULT(Current, Rhs, N)                                 \
   do                                                                    \
-    if (YYID (N)) {                                                     \
+    if (N) {                                                            \
       (Current).first(YYRHSLOC (Rhs, 1));                               \
       (Current).last (YYRHSLOC (Rhs, N));                               \
     } else {                                                            \
       (Current).line0 = (Current).line1 = YYRHSLOC (Rhs, 0).line1;      \
       (Current).char0 = (Current).char1 = YYRHSLOC (Rhs, 0).char1;      \
     }                                                                   \
-  while (YYID (0));                                                     \
+  while (0);                                                            \
   _p->setRuleLocation(&Current);
 
 #define YYCOPY(To, From, Count)                  \
@@ -48,7 +44,7 @@
       YYSTACK_FREE (From);                       \
     }                                            \
   }                                              \
-  while (YYID (0))
+  while (0)
 
 #define YYCOPY_RESET(To, From, Count)           \
   do                                            \
@@ -62,7 +58,7 @@
         YYSTACK_FREE (From);                    \
       }                                         \
     }                                           \
-  while (YYID (0))
+  while (0)
 
 #define YYTOKEN_RESET(From, Count)              \
   do                                            \
@@ -75,7 +71,7 @@
         YYSTACK_FREE (From);                    \
       }                                         \
     }                                           \
-  while (YYID (0))
+  while (0)
 
 # define YYSTACK_RELOCATE_RESET(Stack_alloc, Stack)                     \
   do                                                                    \
@@ -86,7 +82,7 @@
       yynewbytes = yystacksize * sizeof (*Stack) + YYSTACK_GAP_MAXIMUM; \
       yyptr += yynewbytes / sizeof (*yyptr);                            \
     }                                                                   \
-  while (YYID (0))
+  while (0)
 
 #define YYSTACK_CLEANUP                         \
   YYTOKEN_RESET (yyvs, yystacksize);            \
@@ -117,7 +113,7 @@ static void scalar_num(Parser *_p, Token &out, const char *num) {
 
 static void scalar_num(Parser *_p, Token &out, int num) {
   Token t;
-  t.setText(boost::lexical_cast<std::string>(num));
+  t.setText(folly::to<std::string>(num));
   _p->onScalar(out, T_LNUMBER, t);
 }
 
@@ -134,21 +130,6 @@ static void scalar_file(Parser *_p, Token &out) {
 static void scalar_line(Parser *_p, Token &out) {
   Token line; line.setText("__LINE__");
   _p->onScalar(out, T_LINE, line);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// converting constant declaration to "define(name, value);"
-// TODO: get rid of this, or pass in more info, task 3491019.
-
-static void on_constant(Parser *_p, Token &out, Token &name, Token &value) {
-  Token sname;   _p->onScalar(sname, T_CONSTANT_ENCAPSED_STRING, name);
-
-  Token fname;   fname.setText("define");
-  Token params1; _p->onCallParam(params1, NULL, sname, 0);
-  Token params2; _p->onCallParam(params2, &params1, value, 0);
-  Token call;    _p->onCall(call, 0, fname, params2, 0);
-
-  _p->onExpStatement(out, call);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -354,7 +335,7 @@ static void xhp_attribute_stmt(Parser *_p, Token &out, Token &attributes) {
     Token cls;     _p->onName(cls, parent, Parser::StringName);
     Token fname;   fname.setText("__xhpAttributeDeclaration");
     Token param1;  _p->onCall(param1, 0, fname, dummy, &cls);
-    Token params1; _p->onCallParam(params1, NULL, param1, 0);
+    Token params1; _p->onCallParam(params1, NULL, param1, false, false);
 
     for (unsigned int i = 0; i < classes.size(); i++) {
       Token parent;  parent.set(T_STRING, classes[i]);
@@ -362,11 +343,12 @@ static void xhp_attribute_stmt(Parser *_p, Token &out, Token &attributes) {
       Token fname;   fname.setText("__xhpAttributeDeclaration");
       Token param;   _p->onCall(param, 0, fname, dummy, &cls);
 
-      Token params; _p->onCallParam(params, &params1, param, 0);
+      Token params; _p->onCallParam(params, &params1, param, false, false);
       params1 = params;
     }
 
-    Token params2; _p->onCallParam(params2, &params1, arrAttributes, 0);
+    Token params2; _p->onCallParam(params2, &params1, arrAttributes,
+                                   false, false);
 
     Token name;    name.set(T_STRING, "array_merge");
     Token call;    _p->onCall(call, 0, name, params2, NULL);
@@ -545,7 +527,9 @@ static void xhp_children_stmt(Parser *_p, Token &out, Token &children) {
 static void only_in_hh_syntax(Parser *_p) {
   if (!_p->scanner().isHHSyntaxEnabled()) {
     HPHP_PARSER_ERROR(
-      "Syntax only allowed with -v Eval.EnableHipHopSyntax=true", _p);
+      "Syntax only allowed in Hack files (<?hh) or with -v "
+        "Eval.EnableHipHopSyntax=true",
+      _p);
   }
 }
 
@@ -580,6 +564,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 
 %expect 2
 %define api.pure
+%lex-param {HPHP::HPHP_PARSER_NS::Parser *_p}
 %parse-param {HPHP::HPHP_PARSER_NS::Parser *_p}
 
 %left T_INCLUDE T_INCLUDE_ONCE T_EVAL T_REQUIRE T_REQUIRE_ONCE
@@ -590,7 +575,8 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %left T_LOGICAL_XOR
 %left T_LOGICAL_AND
 %right T_PRINT
-%left '=' T_PLUS_EQUAL T_MINUS_EQUAL T_MUL_EQUAL T_DIV_EQUAL T_CONCAT_EQUAL T_MOD_EQUAL T_AND_EQUAL T_OR_EQUAL T_XOR_EQUAL T_SL_EQUAL T_SR_EQUAL
+%left '=' T_PLUS_EQUAL T_MINUS_EQUAL T_MUL_EQUAL T_DIV_EQUAL T_CONCAT_EQUAL T_MOD_EQUAL T_AND_EQUAL T_OR_EQUAL T_XOR_EQUAL T_SL_EQUAL T_SR_EQUAL T_POW_EQUAL
+%right T_AWAIT T_YIELD
 %left '?' ':'
 %left T_BOOLEAN_OR
 %left T_BOOLEAN_AND
@@ -605,6 +591,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %right '!'
 %nonassoc T_INSTANCEOF
 %right '~' T_INC T_DEC T_INT_CAST T_DOUBLE_CAST T_STRING_CAST T_ARRAY_CAST T_OBJECT_CAST T_BOOL_CAST T_UNSET_CAST '@'
+%right T_POW
 %right '['
 
 %nonassoc T_NEW T_CLONE
@@ -621,6 +608,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %token T_VARIABLE
 %token T_NUM_STRING
 %token T_INLINE_HTML
+%token T_HASHBANG
 %token T_CHARACTER
 %token T_BAD_CHARACTER
 %token T_ENCAPSED_AND_WHITESPACE
@@ -636,6 +624,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %token T_DECLARE
 %token T_ENDDECLARE
 %token T_AS
+%token T_SUPER
 %token T_SWITCH
 %token T_ENDSWITCH
 %token T_CASE
@@ -662,6 +651,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %token T_EXTENDS
 %token T_IMPLEMENTS
 %token T_OBJECT_OPERATOR
+%token T_NULLSAFE_OBJECT_OPERATOR
 %token T_DOUBLE_ARROW
 %token T_LIST
 %token T_ARRAY
@@ -687,15 +677,13 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %token T_DIR
 %token T_NS_SEPARATOR
 
-%token T_YIELD
-
 %token T_XHP_LABEL
 %token T_XHP_TEXT
 %token T_XHP_ATTRIBUTE
 %token T_XHP_CATEGORY
 %token T_XHP_CATEGORY_LABEL
 %token T_XHP_CHILDREN
-%token T_XHP_ENUM
+%token T_ENUM
 %token T_XHP_REQUIRED
 
 %token T_TRAIT
@@ -720,9 +708,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %token T_UNRESOLVED_NEWTYPE
 
 %token T_COMPILER_HALT_OFFSET
-%right T_AWAIT
 %token T_ASYNC
-%token T_TUPLE
 
 %right T_FROM
 %token T_WHERE
@@ -763,6 +749,7 @@ top_statement:
     statement                          { _p->nns($1.num(), $1.text()); $$ = $1;}
   | function_declaration_statement     { _p->nns(); $$ = $1;}
   | class_declaration_statement        { _p->nns(); $$ = $1;}
+  | enum_declaration_statement         { _p->nns(); $$ = $1;}
   | trait_declaration_statement        { _p->nns(); $$ = $1;}
   | hh_type_alias_statement            { $$ = $1; }
   | T_HALT_COMPILER '(' ')' ';'        { _p->onHaltCompiler();
@@ -775,18 +762,22 @@ top_statement:
   | T_NAMESPACE '{'                    { _p->onNamespaceStart("");}
     top_statement_list '}'             { _p->onNamespaceEnd(); $$ = $4;}
   | T_USE use_declarations ';'         { _p->nns(); $$.reset();}
+  | T_USE T_FUNCTION
+    use_fn_declarations ';'            { _p->nns(); $$.reset();}
+  | T_USE T_CONST
+    use_const_declarations ';'         { _p->nns(); $$.reset();}
   | constant_declaration ';'           { _p->nns();
                                          _p->finishStatement($$, $1); $$ = 1;}
 ;
 
 ident:
     T_STRING                           { $$ = $1;}
+  | T_SUPER                            { $$ = $1;}
   | T_XHP_ATTRIBUTE                    { $$ = $1;}
   | T_XHP_CATEGORY                     { $$ = $1;}
   | T_XHP_CHILDREN                     { $$ = $1;}
   | T_XHP_REQUIRED                     { $$ = $1;}
-  | T_XHP_ENUM                         { $$ = $1;}
-  | T_TUPLE                            { $$ = $1;}
+  | T_ENUM                             { $$ = $1;}
   | T_WHERE                            { $$ = $1;}
   | T_JOIN                             { $$ = $1;}
   | T_ON                               { $$ = $1;}
@@ -807,12 +798,41 @@ use_declarations:
     use_declaration                    { }
   | use_declaration                    { }
 ;
+
+use_fn_declarations:
+    use_fn_declaration ','
+    use_fn_declaration                 { }
+  | use_fn_declaration                 { }
+;
+
+use_const_declarations:
+    use_const_declaration ','
+    use_const_declaration              { }
+  | use_const_declaration              { }
+;
+
 use_declaration:
     namespace_name                     { _p->onUse($1.text(),"");}
   | T_NS_SEPARATOR namespace_name      { _p->onUse($2.text(),"");}
   | namespace_name T_AS ident          { _p->onUse($1.text(),$3.text());}
   | T_NS_SEPARATOR namespace_name
     T_AS ident                         { _p->onUse($2.text(),$4.text());}
+;
+
+use_fn_declaration:
+    namespace_name                     { _p->onUseFunction($1.text(),"");}
+  | T_NS_SEPARATOR namespace_name      { _p->onUseFunction($2.text(),"");}
+  | namespace_name T_AS ident          { _p->onUseFunction($1.text(),$3.text());}
+  | T_NS_SEPARATOR namespace_name
+    T_AS ident                         { _p->onUseFunction($2.text(),$4.text());}
+;
+
+use_const_declaration:
+    namespace_name                     { _p->onUseConst($1.text(),"");}
+  | T_NS_SEPARATOR namespace_name      { _p->onUseConst($2.text(),"");}
+  | namespace_name T_AS ident          { _p->onUseConst($1.text(),$3.text());}
+  | T_NS_SEPARATOR namespace_name
+    T_AS ident                         { _p->onUseConst($2.text(),$4.text());}
 ;
 
 namespace_name:
@@ -849,11 +869,11 @@ class_namespace_string_typeargs:
 constant_declaration:
     constant_declaration ','
     hh_name_with_type
-    '=' static_scalar                  { $3.setText(_p->nsDecl($3.text()));
-                                         on_constant(_p,$$,$3,$5);}
+    '=' static_expr                    { $3.setText(_p->nsDecl($3.text()));
+                                         _p->onConst($$,$3,$5);}
   | T_CONST hh_name_with_type '='
-    static_scalar                      { $2.setText(_p->nsDecl($2.text()));
-                                         on_constant(_p,$$,$2,$4);}
+    static_expr                        { $2.setText(_p->nsDecl($2.text()));
+                                         _p->onConst($$,$2,$4);}
 ;
 
 inner_statement_list:
@@ -914,12 +934,21 @@ statement:
   | T_UNSET '(' variable_list ')' ';'  { _p->onUnset($$, $3);}
   | ';'                                { $$.reset(); $$ = ';';}
   | T_INLINE_HTML                      { _p->onEcho($$, $1, 1);}
+  | T_HASHBANG                         { _p->onHashBang($$, $1);
+                                         $$ = T_HASHBANG;}
   | T_FOREACH '(' expr
     T_AS foreach_variable
     foreach_optional_arg ')'           { _p->onNewLabelScope(false);
                                          _p->pushLabelScope();}
     foreach_statement                  { _p->popLabelScope();
-                                         _p->onForEach($$,$3,$5,$6,$9);
+                                         _p->onForEach($$,$3,$5,$6,$9, false);
+                                         _p->onCompleteLabelScope(false);}
+  | T_FOREACH '(' expr
+    T_AWAIT T_AS foreach_variable
+    foreach_optional_arg ')'           { _p->onNewLabelScope(false);
+                                         _p->pushLabelScope();}
+    foreach_statement                  { _p->popLabelScope();
+                                         _p->onForEach($$,$3,$6,$7,$10, true);
                                          _p->onCompleteLabelScope(false);}
   | T_DECLARE '(' declare_list ')'
     declare_statement                  { _p->onBlock($$, $5); $$ = T_DECLARE;}
@@ -1032,9 +1061,27 @@ function_declaration_statement:
                                          _p->onCompleteLabelScope(true);}
 ;
 
+enum_declaration_statement:
+    T_ENUM
+    ident                              { $2.setText(_p->nsClassDecl($2.text()));
+                                         _p->onClassStart(T_ENUM,$2);}
+    ':' hh_type
+    hh_opt_constraint
+    '{' enum_statement_list '}'        { _p->onEnum($$,$2,$5,$8,0); }
+
+  | non_empty_user_attributes
+    T_ENUM
+    ident                              { $3.setText(_p->nsClassDecl($3.text()));
+                                         _p->onClassStart(T_ENUM,$3);}
+    ':' hh_type
+    hh_opt_constraint
+    '{' enum_statement_list '}'        { _p->onEnum($$,$3,$6,$9,&$1); }
+
+;
+
 class_declaration_statement:
     class_entry_type
-    class_decl_name                    { $2.setText(_p->nsDecl($2.text()));
+    class_decl_name                    { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart($1.num(),$2);}
     extends_from implements_list '{'
     class_statement_list '}'           { Token stmts;
@@ -1044,7 +1091,7 @@ class_declaration_statement:
                                            stmts = $7;
                                          }
                                          _p->onClass($$,$1.num(),$2,$4,$5,
-                                                     stmts,0);
+                                                     stmts,0,nullptr);
                                          if (_p->peekClass()) {
                                            _p->xhpResetAttributes();
                                          }
@@ -1052,7 +1099,7 @@ class_declaration_statement:
                                          _p->popTypeScope();}
   | non_empty_user_attributes
     class_entry_type
-    class_decl_name                    { $3.setText(_p->nsDecl($3.text()));
+    class_decl_name                    { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart($2.num(),$3);}
     extends_from implements_list '{'
     class_statement_list '}'           { Token stmts;
@@ -1062,14 +1109,14 @@ class_declaration_statement:
                                            stmts = $8;
                                          }
                                          _p->onClass($$,$2.num(),$3,$5,$6,
-                                                     stmts,&$1);
+                                                     stmts,&$1,nullptr);
                                          if (_p->peekClass()) {
                                            _p->xhpResetAttributes();
                                          }
                                          _p->popClass();
                                          _p->popTypeScope();}
   | T_INTERFACE
-    interface_decl_name                { $2.setText(_p->nsDecl($2.text()));
+    interface_decl_name                { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart(T_INTERFACE,$2);}
     interface_extends_list '{'
     class_statement_list '}'           { _p->onInterface($$,$2,$4,$6,0);
@@ -1077,7 +1124,7 @@ class_declaration_statement:
                                          _p->popTypeScope();}
   | non_empty_user_attributes
     T_INTERFACE
-    interface_decl_name                { $3.setText(_p->nsDecl($3.text()));
+    interface_decl_name                { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart(T_INTERFACE,$3);}
     interface_extends_list '{'
     class_statement_list '}'           { _p->onInterface($$,$3,$5,$7,&$1);
@@ -1087,24 +1134,24 @@ class_declaration_statement:
 
 trait_declaration_statement:
     T_TRAIT
-    trait_decl_name                    { $2.setText(_p->nsDecl($2.text()));
+    trait_decl_name                    { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart(T_TRAIT, $2);}
     implements_list
     '{' class_statement_list '}'       { Token t_ext;
                                          t_ext.reset();
                                          _p->onClass($$,T_TRAIT,$2,t_ext,$4,
-                                                     $6, 0);
+                                                     $6, 0, nullptr);
                                          _p->popClass();
                                          _p->popTypeScope();}
   | non_empty_user_attributes
     T_TRAIT
-    trait_decl_name                    { $3.setText(_p->nsDecl($3.text()));
+    trait_decl_name                    { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart(T_TRAIT, $3);}
     implements_list
     '{' class_statement_list '}'       { Token t_ext;
                                          t_ext.reset();
                                          _p->onClass($$,T_TRAIT,$3,t_ext,$5,
-                                                     $7, &$1);
+                                                     $7, &$1, nullptr);
                                          _p->popClass();
                                          _p->popTypeScope();}
 ;
@@ -1121,7 +1168,11 @@ trait_decl_name:
 ;
 class_entry_type:
     T_CLASS                            { $$ = T_CLASS;}
-  | T_ABSTRACT T_CLASS                 { $$ = T_ABSTRACT;}
+  | T_ABSTRACT T_CLASS                 { $$ = T_ABSTRACT; }
+  | T_ABSTRACT T_FINAL T_CLASS         { only_in_hh_syntax(_p);
+      /* hacky, but transforming to a single token is quite convenient */
+      $$ = T_STATIC; }
+  | T_FINAL T_ABSTRACT T_CLASS         { only_in_hh_syntax(_p); $$ = T_STATIC; }
   | T_FINAL T_CLASS                    { $$ = T_FINAL;}
 ;
 extends_from:
@@ -1153,7 +1204,7 @@ foreach_optional_arg:
   |                                    { $$.reset();}
 ;
 foreach_variable:
-    variable                           { $$ = $1;}
+    variable                           { $$ = $1; $$ = 0;}
   | '&' variable                       { $$ = $2; $$ = 1;}
   | T_LIST '(' assignment_list ')'     { _p->onListAssignment($$, $3, NULL);}
 ;
@@ -1180,9 +1231,9 @@ declare_statement:
 ;
 
 declare_list:
-    ident '=' static_scalar
+    ident '=' static_expr
   | declare_list ','
-    ident '=' static_scalar
+    ident '=' static_expr
 ;
 
 switch_case_list:
@@ -1234,6 +1285,12 @@ method_parameter_list:
   | non_empty_method_parameter_list ','
     optional_user_attributes
     parameter_modifiers
+    hh_type_opt '&' "..." T_VARIABLE
+                                      { _p->onVariadicParam($$,&$1,$5,$8,true,
+                                                            &$3,&$4); }
+  | non_empty_method_parameter_list ','
+    optional_user_attributes
+    parameter_modifiers
     hh_type_opt "..."
                                       { validate_hh_variadic_variant(
                                           _p, $3, $5, &$4);
@@ -1244,6 +1301,11 @@ method_parameter_list:
     parameter_modifiers
     hh_type_opt "..." T_VARIABLE
                                       { _p->onVariadicParam($$,NULL,$3,$5,false,
+                                                            &$1,&$2); }
+  | optional_user_attributes
+    parameter_modifiers
+    hh_type_opt '&' "..." T_VARIABLE
+                                      { _p->onVariadicParam($$,NULL,$3,$6,true,
                                                             &$1,&$2); }
   | optional_user_attributes
     parameter_modifiers
@@ -1266,12 +1328,12 @@ non_empty_method_parameter_list:
   | optional_user_attributes
     parameter_modifiers
     hh_type_opt '&' T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,NULL,$3,$5,1,
+    '=' expr                           { _p->onParam($$,NULL,$3,$5,1,
                                                      &$7,&$1,&$2);}
   | optional_user_attributes
     parameter_modifiers
     hh_type_opt T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,NULL,$3,$4,0,
+    '=' expr                           { _p->onParam($$,NULL,$3,$4,0,
                                                      &$6,&$1,&$2);}
   | non_empty_method_parameter_list ','
     optional_user_attributes
@@ -1287,13 +1349,13 @@ non_empty_method_parameter_list:
     optional_user_attributes
     parameter_modifiers
     hh_type_opt '&' T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,&$1,$5,$7,1,
+    '=' expr                           { _p->onParam($$,&$1,$5,$7,1,
                                                      &$9,&$3,&$4);}
   | non_empty_method_parameter_list ','
     optional_user_attributes
     parameter_modifiers
     hh_type_opt T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,&$1,$5,$6,0,
+    '=' expr                           { _p->onParam($$,&$1,$5,$6,0,
                                                      &$8,&$3,&$4);}
 ;
 
@@ -1303,6 +1365,11 @@ parameter_list:
     hh_type_opt "..." T_VARIABLE
                                       { _p->onVariadicParam($$,&$1,$4,$6,
                                         false,&$3,NULL); }
+  | non_empty_parameter_list ','
+    optional_user_attributes
+    hh_type_opt '&' "..." T_VARIABLE
+                                      { _p->onVariadicParam($$,&$1,$4,$7,
+                                        true,&$3,NULL); }
   | non_empty_parameter_list ','
     optional_user_attributes
     hh_type_opt "..."
@@ -1315,6 +1382,10 @@ parameter_list:
     hh_type_opt "..." T_VARIABLE
                                       { _p->onVariadicParam($$,NULL,$2,$4,
                                                             false,&$1,NULL); }
+  | optional_user_attributes
+    hh_type_opt '&' "..." T_VARIABLE
+                                      { _p->onVariadicParam($$,NULL,$2,$5,
+                                                            true,&$1,NULL); }
   | optional_user_attributes
     hh_type_opt "..."
                                       { validate_hh_variadic_variant(
@@ -1332,11 +1403,11 @@ non_empty_parameter_list:
                                                      NULL,&$1,NULL); }
   | optional_user_attributes
     hh_type_opt '&' T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,NULL,$2,$4,true,
+    '=' expr                           { _p->onParam($$,NULL,$2,$4,true,
                                                      &$6,&$1,NULL); }
   | optional_user_attributes
     hh_type_opt T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,NULL,$2,$3,false,
+    '=' expr                           { _p->onParam($$,NULL,$2,$3,false,
                                                      &$5,&$1,NULL); }
   | non_empty_parameter_list ','
     optional_user_attributes
@@ -1349,12 +1420,12 @@ non_empty_parameter_list:
   | non_empty_parameter_list ','
     optional_user_attributes
     hh_type_opt '&' T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,&$1,$4,$6,true,
+    '=' expr                           { _p->onParam($$,&$1,$4,$6,true,
                                                      &$8,&$3,NULL); }
   | non_empty_parameter_list ','
     optional_user_attributes
     hh_type_opt T_VARIABLE
-    '=' static_scalar                  { _p->onParam($$,&$1,$4,$5,false,
+    '=' expr                           { _p->onParam($$,&$1,$4,$5,false,
                                                      &$7,&$3,NULL); }
 ;
 
@@ -1364,12 +1435,15 @@ function_call_parameter_list:
   |                                    { $$.reset();}
 ;
 non_empty_fcall_parameter_list:
-    expr                               { _p->onCallParam($$,NULL,$1,0);}
-  | '&' variable                       { _p->onCallParam($$,NULL,$2,1);}
-  | non_empty_fcall_parameter_list ','
-    expr                               { _p->onCallParam($$,&$1,$3,0);}
-  | non_empty_fcall_parameter_list ','
-    '&' variable                       { _p->onCallParam($$,&$1,$4,1);}
+  expr                               { _p->onCallParam($$,NULL,$1,false,false);}
+| '&' variable                       { _p->onCallParam($$,NULL,$2,true,false);}
+| "..." expr                         { _p->onCallParam($$,NULL,$2,false,true);}
+| non_empty_fcall_parameter_list
+',' expr                           { _p->onCallParam($$,&$1,$3,false, false);}
+| non_empty_fcall_parameter_list
+',' "..." expr                     { _p->onCallParam($$,&$1,$4,false,true);}
+| non_empty_fcall_parameter_list
+',' '&' variable                   { _p->onCallParam($$,&$1,$4,true, false);}
 ;
 
 global_var_list:
@@ -1385,10 +1459,25 @@ global_var:
 static_var_list:
     static_var_list ',' T_VARIABLE     { _p->onStaticVariable($$,&$1,$3,0);}
   | static_var_list ',' T_VARIABLE
-    '=' static_scalar                  { _p->onStaticVariable($$,&$1,$3,&$5);}
+    '=' static_expr                    { _p->onStaticVariable($$,&$1,$3,&$5);}
   | T_VARIABLE                         { _p->onStaticVariable($$,0,$1,0);}
-  | T_VARIABLE '=' static_scalar       { _p->onStaticVariable($$,0,$1,&$3);}
+  | T_VARIABLE '=' static_expr         { _p->onStaticVariable($$,0,$1,&$3);}
 ;
+
+enum_statement_list:
+    enum_statement_list
+    enum_statement                     { _p->onClassStatement($$, $1, $2);}
+  |                                    { $$.reset();}
+;
+enum_statement:
+    enum_constant_declaration ';'      { _p->onClassVariableStart
+                                         ($$,NULL,$1,NULL);}
+;
+enum_constant_declaration:
+    hh_name_with_type '='
+    static_expr                         { _p->onClassConstant($$,0,$1,$3);}
+;
+
 
 class_statement_list:
     class_statement_list
@@ -1405,6 +1494,10 @@ class_statement:
                                          ($$,&$1,$4,&$2);}
   | class_constant_declaration ';'     { _p->onClassVariableStart
                                          ($$,NULL,$1,NULL);}
+  | class_abstract_constant_declaration ';'
+                                       { _p->onClassVariableStart
+                                         ($$,NULL,$1,NULL, true);}
+  | class_type_constant_declaration ';' { $$ = $1; }
   | method_modifiers function_loc
     is_reference hh_name_with_typevar '('
                                        { _p->onNewLabelScope(true);
@@ -1437,9 +1530,9 @@ class_statement:
   | T_XHP_CHILDREN
     xhp_children_stmt ';'              { xhp_children_stmt(_p,$$,$2);}
   | T_REQUIRE T_EXTENDS fully_qualified_class_name  ';'
-                                       { _p->onTraitRequire($$, $3, true); }
+                                       { _p->onClassRequire($$, $3, true); }
   | T_REQUIRE T_IMPLEMENTS fully_qualified_class_name ';'
-                                       { _p->onTraitRequire($$, $3, false); }
+                                       { _p->onClassRequire($$, $3, false); }
   | T_USE trait_list ';'               { Token t; t.reset();
                                          _p->onTraitUse($$,$2,t); }
   | T_USE trait_list '{'
@@ -1481,7 +1574,7 @@ xhp_attribute_stmt:
 ;
 
 xhp_attribute_decl:
-    xhp_attribute_decl_type
+    xhp_nullable_attribute_decl_type
     xhp_label_ws
     xhp_attribute_default
     xhp_attribute_is_required          { xhp_attribute(_p,$$,$1,$2,$3,$4);
@@ -1489,8 +1582,17 @@ xhp_attribute_decl:
   | T_XHP_LABEL                        { $$ = $1; $$ = 0;}
 ;
 
+xhp_nullable_attribute_decl_type:
+  '?' xhp_attribute_decl_type          { $$ = $2;}
+  | xhp_attribute_decl_type
+;
+
 xhp_attribute_decl_type:
     T_ARRAY                            { $$ = 4;}
+  | T_ARRAY T_TYPELIST_LT hh_type
+    T_TYPELIST_GT                      { $$ = 4;}
+  | T_ARRAY T_TYPELIST_LT hh_type ','
+    hh_type T_TYPELIST_GT              { $$ = 4;}
   | fully_qualified_class_name         { /* This case handles all types other
                                             than "array", "var" and "enum".
                                             For now we just use type code 5;
@@ -1498,8 +1600,9 @@ xhp_attribute_decl_type:
                                             the type code as appropriate. */
                                          $$ = 5; $$.setText($1);}
   | T_VAR                              { $$ = 6;}
-  | T_XHP_ENUM '{'
+  | T_ENUM '{'
     xhp_attribute_enum '}'             { $$ = $3; $$ = 7;}
+  | T_CALLABLE                         { $$ = 9; }
 ;
 
 xhp_attribute_enum:
@@ -1509,7 +1612,7 @@ xhp_attribute_enum:
 ;
 
 xhp_attribute_default:
-    '=' static_scalar                  { $$ = $2;}
+    '=' static_expr                    { $$ = $2;}
   |                                    { scalar_null(_p, $$);}
 ;
 
@@ -1610,14 +1713,32 @@ class_variable_declaration:
     class_variable_declaration ','
     T_VARIABLE                         { _p->onClassVariable($$,&$1,$3,0);}
   | class_variable_declaration ','
-    T_VARIABLE '=' static_scalar       { _p->onClassVariable($$,&$1,$3,&$5);}
+    T_VARIABLE '=' static_expr         { _p->onClassVariable($$,&$1,$3,&$5);}
   | T_VARIABLE                         { _p->onClassVariable($$,0,$1,0);}
-  | T_VARIABLE '=' static_scalar       { _p->onClassVariable($$,0,$1,&$3);}
+  | T_VARIABLE '=' static_expr         { _p->onClassVariable($$,0,$1,&$3);}
 ;
 class_constant_declaration:
     class_constant_declaration ','
-    hh_name_with_type '=' static_scalar { _p->onClassConstant($$,&$1,$3,$5);}
-  | T_CONST hh_name_with_type '=' static_scalar { _p->onClassConstant($$,0,$2,$4);}
+    hh_name_with_type '=' static_expr   { _p->onClassConstant($$,&$1,$3,$5);}
+  | T_CONST hh_name_with_type '='
+    static_expr                         { _p->onClassConstant($$,0,$2,$4);}
+;
+class_abstract_constant_declaration:
+    class_abstract_constant_declaration ','
+    hh_name_with_type                   { _p->onClassAbstractConstant($$,&$1,$3);}
+  | T_ABSTRACT T_CONST hh_name_with_type
+                                        { _p->onClassAbstractConstant($$,NULL,$3);}
+;
+class_type_constant_declaration:
+    T_ABSTRACT class_type_constant
+      hh_opt_constraint                 { Token t;
+                                          _p->onClassTypeConstant($$, $2, t);
+                                          _p->popTypeScope(); }
+  | class_type_constant
+      hh_opt_constraint '=' hh_type     { _p->onClassTypeConstant($$, $1, $4);
+                                          _p->popTypeScope(); }
+class_type_constant:
+    T_CONST T_TYPE hh_name_with_typevar { $$ = $3; }
 ;
 
 expr_with_parens:
@@ -1643,8 +1764,9 @@ for_expr:
 ;
 
 yield_expr:
-    T_YIELD expr                       { _p->onYield($$, $2);}
-  | T_YIELD expr T_DOUBLE_ARROW expr   { _p->onYieldPair($$, $2, $4);}
+    T_YIELD                            { _p->onYield($$, NULL);}
+  | T_YIELD expr                       { _p->onYield($$, &$2);}
+  | T_YIELD expr T_DOUBLE_ARROW expr   { _p->onYieldPair($$, &$2, &$4);}
 ;
 
 yield_assign_expr:
@@ -1673,6 +1795,9 @@ expr:
     expr_no_variable                   { $$ = $1;}
   | variable                           { $$ = $1;}
   | expr_with_parens                   { $$ = $1;}
+  | lambda_or_closure                  { $$ = $1;}
+  | lambda_or_closure_with_parens      { $$ = $1;}
+;
 
 expr_no_variable:
     T_LIST '(' assignment_list ')'
@@ -1693,6 +1818,7 @@ expr_no_variable:
   | variable T_XOR_EQUAL expr          { BEXP($$,$1,$3,T_XOR_EQUAL);}
   | variable T_SL_EQUAL expr           { BEXP($$,$1,$3,T_SL_EQUAL);}
   | variable T_SR_EQUAL expr           { BEXP($$,$1,$3,T_SR_EQUAL);}
+  | variable T_POW_EQUAL expr          { BEXP($$,$1,$3,T_POW_EQUAL);}
   | variable T_INC                     { UEXP($$,$1,T_INC,0);}
   | T_INC variable                     { UEXP($$,$2,T_INC,1);}
   | variable T_DEC                     { UEXP($$,$1,T_DEC,0);}
@@ -1710,6 +1836,7 @@ expr_no_variable:
   | expr '-' expr                      { BEXP($$,$1,$3,'-');}
   | expr '*' expr                      { BEXP($$,$1,$3,'*');}
   | expr '/' expr                      { BEXP($$,$1,$3,'/');}
+  | expr T_POW expr                    { BEXP($$,$1,$3,T_POW);}
   | expr '%' expr                      { BEXP($$,$1,$3,'%');}
   | expr T_SL expr                     { BEXP($$,$1,$3,T_SL);}
   | expr T_SR expr                     { BEXP($$,$1,$3,T_SR);}
@@ -1747,8 +1874,6 @@ expr_no_variable:
   | shape_literal                      { $$ = $1; }
   | '`' backticks_expr '`'             { _p->onEncapsList($$,'`',$2);}
   | T_PRINT expr                       { UEXP($$,$2,T_PRINT,1);}
-  | closure_expression                 { $$ = $1;}
-  | lambda_expression                  { $$ = $1;}
   | dim_expr                           { $$ = $1;}
 ;
 
@@ -1771,7 +1896,7 @@ closure_expression:
     '{' inner_statement_list '}'       { _p->finishStatement($10, $10); $10 = 1;
                                          $$ = _p->onClosure(ClosureType::Long,
                                                             nullptr,
-                                                            $2,$5,$8,$10);
+                                                            $2,$5,$8,$10,$7);
                                          _p->popLabelInfo();
                                          _p->onCompleteLabelScope(true);}
   | non_empty_member_modifiers
@@ -1785,7 +1910,7 @@ closure_expression:
     '{' inner_statement_list '}'       { _p->finishStatement($11, $11); $11 = 1;
                                          $$ = _p->onClosure(ClosureType::Long,
                                                             &$1,
-                                                            $3,$6,$9,$11);
+                                                            $3,$6,$9,$11,$8);
                                          _p->popLabelInfo();
                                          _p->onCompleteLabelScope(true);}
 ;
@@ -1799,11 +1924,29 @@ lambda_expression:
                                          Token u;
                                          _p->onParam($1,NULL,u,$1,0,
                                                      NULL,NULL,NULL);}
-    lambda_body                        { Token v; Token w;
+    lambda_body                        { Token v; Token w; Token x;
                                          _p->finishStatement($3, $3); $3 = 1;
                                          $$ = _p->onClosure(ClosureType::Short,
                                                             nullptr,
-                                                            v,$1,w,$3);
+                                                            v,$1,w,$3,x);
+                                         _p->popLabelInfo();
+                                         _p->onCompleteLabelScope(true);}
+  | T_ASYNC
+    T_VARIABLE                         { _p->pushFuncLocation();
+                                         Token t;
+                                         _p->onNewLabelScope(true);
+                                         _p->onClosureStart(t);
+                                         _p->pushLabelInfo();
+                                         Token u;
+                                         _p->onParam($2,NULL,u,$2,0,
+                                                     NULL,NULL,NULL);}
+    lambda_body                        { Token v; Token w; Token x;
+                                         $1 = T_ASYNC;
+                                         _p->onMemberModifier($1, nullptr, $1);
+                                         _p->finishStatement($4, $4); $4 = 1;
+                                         $$ = _p->onClosure(ClosureType::Short,
+                                                            &$1,
+                                                            v,$2,w,$4,x);
                                          _p->popLabelInfo();
                                          _p->onCompleteLabelScope(true);}
   | T_LAMBDA_OP                        { _p->pushFuncLocation();
@@ -1818,20 +1961,58 @@ lambda_expression:
                                          _p->finishStatement($6, $6); $6 = 1;
                                          $$ = _p->onClosure(ClosureType::Short,
                                                             nullptr,
-                                                            u,$3,v,$6);
+                                                            u,$3,v,$6,$5);
                                          _p->popLabelInfo();
                                          _p->onCompleteLabelScope(true);}
+  | T_ASYNC
+    T_LAMBDA_OP                        { _p->pushFuncLocation();
+                                         Token t;
+                                         _p->onNewLabelScope(true);
+                                         _p->onClosureStart(t);
+                                         _p->pushLabelInfo();}
+    parameter_list
+    T_LAMBDA_CP
+    hh_opt_return_type
+    lambda_body                        { Token u; Token v;
+                                         $1 = T_ASYNC;
+                                         _p->onMemberModifier($1, nullptr, $1);
+                                         _p->finishStatement($7, $7); $7 = 1;
+                                         $$ = _p->onClosure(ClosureType::Short,
+                                                            &$1,
+                                                            u,$4,v,$7,$6);
+                                         _p->popLabelInfo();
+                                         _p->onCompleteLabelScope(true);}
+  | T_ASYNC
+    '{'                                { _p->pushFuncLocation();
+                                         Token t;
+                                         _p->onNewLabelScope(true);
+                                         _p->onClosureStart(t);
+                                         _p->pushLabelInfo();}
+    inner_statement_list
+    '}'                                { Token u; Token v; Token w; Token x;
+                                         Token y;
+                                         $1 = T_ASYNC;
+                                         _p->onMemberModifier($1, nullptr, $1);
+                                         _p->finishStatement($4, $4); $4 = 1;
+                                         $$ = _p->onClosure(ClosureType::Short,
+                                                            &$1,
+                                                            u,v,w,$4,x);
+                                         _p->popLabelInfo();
+                                         _p->onCompleteLabelScope(true);
+                                         _p->onCall($$,1,$$,y,NULL);}
 ;
 
 lambda_body:
     T_LAMBDA_ARROW expr               { $$ = _p->onExprForLambda($2);}
+  | T_LAMBDA_ARROW await_expr         { $$ = _p->onExprForLambda($2);}
   | T_LAMBDA_ARROW
-    '{' inner_statement_list '}'      { $$ = $3;}
+    '{' inner_statement_list '}'      { $$ = $3; }
 ;
 
 shape_keyname:
     T_CONSTANT_ENCAPSED_STRING        { validate_shape_keyname($1, _p);
                                         _p->onScalar($$, T_CONSTANT_ENCAPSED_STRING, $1); }
+  | class_constant                    { $$ = $1; }
 ;
 
 non_empty_shape_pair_list:
@@ -1848,10 +2029,10 @@ non_empty_static_shape_pair_list:
     non_empty_static_shape_pair_list ','
       shape_keyname
       T_DOUBLE_ARROW
-      static_scalar                   { _p->onArrayPair($$,&$1,&$3,$5,0); }
+      static_expr                     { _p->onArrayPair($$,&$1,&$3,$5,0); }
   | shape_keyname
       T_DOUBLE_ARROW
-      static_scalar                   { _p->onArrayPair($$,  0,&$1,$3,0); }
+      static_expr                     { _p->onArrayPair($$,  0,&$1,$3,0); }
 ;
 
 shape_pair_list:
@@ -1899,6 +2080,9 @@ dim_expr:
 dim_expr_base:
     array_literal                      { $$ = $1;}
   | class_constant                     { $$ = $1;}
+  | lambda_or_closure_with_parens      { $$ = $1;}
+  | T_CONSTANT_ENCAPSED_STRING         { _p->onScalar($$,
+                                         T_CONSTANT_ENCAPSED_STRING, $1); }
   | '(' expr_no_variable ')'           { $$ = $2;}
 ;
 
@@ -2016,10 +2200,10 @@ xhp_tag_body:
                                          Token t2; _p->onArray(t2,$2);
                                          Token file; scalar_file(_p, file);
                                          Token line; scalar_line(_p, line);
-                                         _p->onCallParam($1,NULL,t1,0);
-                                         _p->onCallParam($$, &$1,t2,0);
-                                         _p->onCallParam($1, &$1,file,0);
-                                         _p->onCallParam($1, &$1,line,0);
+                                         _p->onCallParam($1,NULL,t1,0,0);
+                                         _p->onCallParam($$, &$1,t2,0,0);
+                                         _p->onCallParam($1, &$1,file,0,0);
+                                         _p->onCallParam($1, &$1,line,0,0);
                                          $$.setText("");}
   | xhp_attributes T_XHP_TAG_GT
     xhp_children T_XHP_TAG_LT '/'
@@ -2027,10 +2211,10 @@ xhp_tag_body:
                                          Token line; scalar_line(_p, line);
                                          _p->onArray($4,$1);
                                          _p->onArray($5,$3);
-                                         _p->onCallParam($2,NULL,$4,0);
-                                         _p->onCallParam($$, &$2,$5,0);
-                                         _p->onCallParam($2, &$2,file,0);
-                                         _p->onCallParam($2, &$2,line,0);
+                                         _p->onCallParam($2,NULL,$4,0,0);
+                                         _p->onCallParam($$, &$2,$5,0,0);
+                                         _p->onCallParam($2, &$2,file,0,0);
+                                         _p->onCallParam($2, &$2,line,0,0);
                                          $$.setText($6.text());}
 ;
 xhp_opt_end_label:
@@ -2219,20 +2403,63 @@ common_scalar:
     T_END_HEREDOC                      { $$.setText(""); _p->onScalar($$, T_CONSTANT_ENCAPSED_STRING, $$);}
 ;
 
-static_scalar:
+static_expr:
     common_scalar                      { $$ = $1;}
   | namespace_string                   { _p->onConstantValue($$, $1);}
-  | '+' static_scalar                  { UEXP($$,$2,'+',1);}
-  | '-' static_scalar                  { UEXP($$,$2,'-',1);}
   | T_ARRAY '('
-    static_array_pair_list ')'         { _p->onArray($$,$3,T_ARRAY); }
-  | T_TUPLE '('
     static_array_pair_list ')'         { _p->onArray($$,$3,T_ARRAY); }
   | '[' static_array_pair_list ']'     { _p->onArray($$,$2,T_ARRAY); }
   | T_SHAPE '('
     static_shape_pair_list ')'         { _p->onArray($$,$3,T_ARRAY); }
   | static_class_constant              { $$ = $1;}
   | static_collection_literal          { $$ = $1;}
+  | '(' static_expr ')'                { $$ = $2;}
+  | static_expr T_BOOLEAN_OR
+    static_expr                        { BEXP($$,$1,$3,T_BOOLEAN_OR);}
+  | static_expr T_BOOLEAN_AND
+    static_expr                        { BEXP($$,$1,$3,T_BOOLEAN_AND);}
+  | static_expr T_LOGICAL_OR
+    static_expr                        { BEXP($$,$1,$3,T_LOGICAL_OR);}
+  | static_expr T_LOGICAL_AND
+    static_expr                        { BEXP($$,$1,$3,T_LOGICAL_AND);}
+  | static_expr T_LOGICAL_XOR
+    static_expr                        { BEXP($$,$1,$3,T_LOGICAL_XOR);}
+  | static_expr '|' static_expr        { BEXP($$,$1,$3,'|');}
+  | static_expr '&' static_expr        { BEXP($$,$1,$3,'&');}
+  | static_expr '^' static_expr        { BEXP($$,$1,$3,'^');}
+  | static_expr '.' static_expr        { BEXP($$,$1,$3,'.');}
+  | static_expr '+' static_expr        { BEXP($$,$1,$3,'+');}
+  | static_expr '-' static_expr        { BEXP($$,$1,$3,'-');}
+  | static_expr '*' static_expr        { BEXP($$,$1,$3,'*');}
+  | static_expr '/' static_expr        { BEXP($$,$1,$3,'/');}
+  | static_expr '%' static_expr        { BEXP($$,$1,$3,'%');}
+  | static_expr T_SL static_expr       { BEXP($$,$1,$3,T_SL);}
+  | static_expr T_SR static_expr       { BEXP($$,$1,$3,T_SR);}
+  | static_expr T_POW static_expr      { BEXP($$,$1,$3,T_POW);}
+  | '!' static_expr                    { UEXP($$,$2,'!',1);}
+  | '~' static_expr                    { UEXP($$,$2,'~',1);}
+  | '+' static_expr                    { UEXP($$,$2,'+',1);}
+  | '-' static_expr                    { UEXP($$,$2,'-',1);}
+  | static_expr T_IS_IDENTICAL
+    static_expr                        { BEXP($$,$1,$3,T_IS_IDENTICAL);}
+  | static_expr T_IS_NOT_IDENTICAL
+    static_expr                        { BEXP($$,$1,$3,T_IS_NOT_IDENTICAL);}
+  | static_expr T_IS_EQUAL
+    static_expr                        { BEXP($$,$1,$3,T_IS_EQUAL);}
+  | static_expr T_IS_NOT_EQUAL
+    static_expr                        { BEXP($$,$1,$3,T_IS_NOT_EQUAL);}
+  | static_expr '<' static_expr        { BEXP($$,$1,$3,'<');}
+  | static_expr T_IS_SMALLER_OR_EQUAL
+    static_expr                        { BEXP($$,$1,$3,
+                                              T_IS_SMALLER_OR_EQUAL);}
+  | static_expr '>' static_expr        { BEXP($$,$1,$3,'>');}
+  | static_expr
+    T_IS_GREATER_OR_EQUAL
+    static_expr                        { BEXP($$,$1,$3,
+                                              T_IS_GREATER_OR_EQUAL);}
+  | static_expr '?' static_expr ':'
+    static_expr                        { _p->onQOp($$, $1, &$3, $5);}
+  | static_expr '?' ':' static_expr    { _p->onQOp($$, $1,   0, $4);}
 ;
 
 static_class_constant:
@@ -2275,21 +2502,19 @@ hh_possible_comma:
 
 non_empty_static_array_pair_list:
     non_empty_static_array_pair_list
-    ',' static_scalar T_DOUBLE_ARROW
-    static_scalar                      { _p->onArrayPair($$,&$1,&$3,$5,0);}
+    ',' static_expr T_DOUBLE_ARROW
+    static_expr                        { _p->onArrayPair($$,&$1,&$3,$5,0);}
   | non_empty_static_array_pair_list
-    ',' static_scalar                  { _p->onArrayPair($$,&$1,  0,$3,0);}
-  | static_scalar T_DOUBLE_ARROW
-    static_scalar                      { _p->onArrayPair($$,  0,&$1,$3,0);}
-  | static_scalar                      { _p->onArrayPair($$,  0,  0,$1,0);}
+    ',' static_expr                    { _p->onArrayPair($$,&$1,  0,$3,0);}
+  | static_expr T_DOUBLE_ARROW
+    static_expr                        { _p->onArrayPair($$,  0,&$1,$3,0);}
+  | static_expr                        { _p->onArrayPair($$,  0,  0,$1,0);}
 ;
 
 common_scalar_ae:
     T_LNUMBER                          { _p->onScalar($$, T_LNUMBER,  $1);}
   | T_DNUMBER                          { _p->onScalar($$, T_DNUMBER,  $1);}
   | T_ONUMBER                          { _p->onScalar($$, T_ONUMBER,  $1);}
-  | T_CONSTANT_ENCAPSED_STRING         { _p->onScalar($$,
-                                         T_CONSTANT_ENCAPSED_STRING,  $1);}
   | T_START_HEREDOC
     T_ENCAPSED_AND_WHITESPACE
     T_END_HEREDOC                      { _p->onScalar($$, T_CONSTANT_ENCAPSED_STRING, $2);}
@@ -2302,14 +2527,23 @@ static_numeric_scalar_ae:
   | T_ONUMBER                          { _p->onScalar($$,T_ONUMBER,$1);}
   | ident                              { constant_ae(_p,$$,$1);}
 ;
+
+static_string_expr_ae:
+    T_CONSTANT_ENCAPSED_STRING         { _p->onScalar($$,
+                                         T_CONSTANT_ENCAPSED_STRING,$1);}
+  | T_CONSTANT_ENCAPSED_STRING '.' static_string_expr_ae
+                                       { _p->onScalar($$,
+                                         T_CONSTANT_ENCAPSED_STRING,
+                                         $1 + $3);}
+;
+
 static_scalar_ae:
-    common_scalar_ae                   { $$ = $1;}
+    common_scalar_ae
+  | static_string_expr_ae              { $$ = $1;}
   | ident                              { constant_ae(_p,$$,$1);}
   | '+' static_numeric_scalar_ae       { UEXP($$,$2,'+',1);}
   | '-' static_numeric_scalar_ae       { UEXP($$,$2,'-',1);}
   | T_ARRAY '('
-    static_array_pair_list_ae ')'      { _p->onArray($$,$3,T_ARRAY);}
-  | T_TUPLE '('
     static_array_pair_list_ae ')'      { _p->onArray($$,$3,T_ARRAY);}
   | '[' static_array_pair_list_ae ']'  { _p->onArray($$,$2,T_ARRAY);}
   | T_SHAPE '('
@@ -2382,15 +2616,30 @@ optional_user_attributes:
   |                                    { $$.reset();}
 ;
 
-property_access:
-    property_access_without_variables  { $$ = $1;}
-  | T_OBJECT_OPERATOR
-    variable_without_objects           { $$ = $2;}
+object_operator:
+    T_OBJECT_OPERATOR                  { $$ = $1; $$ = 0;}
+  | T_NULLSAFE_OBJECT_OPERATOR         { $$ = $1; $$ = 1;}
 ;
 
-property_access_without_variables:
-    T_OBJECT_OPERATOR ident            { $$ = $2;}
-  | T_OBJECT_OPERATOR '{' expr '}'     { $$ = $3;}
+object_property_name_no_variables:
+    ident                              { $$ = $1; $$ = HPHP::ObjPropNormal;}
+  | T_XHP_LABEL                        { $$ = $1; $$ = HPHP::ObjPropXhpAttr;}
+  | '{' expr '}'                       { $$ = $2; $$ = HPHP::ObjPropNormal;}
+;
+
+object_property_name:
+    object_property_name_no_variables  { $$ = $1;}
+  | variable_no_objects                { $$ = $1; $$ = HPHP::ObjPropNormal;}
+;
+
+object_method_name_no_variables:
+    ident                              { $$ = $1;}
+  | '{' expr '}'                       { $$ = $2;}
+;
+
+object_method_name:
+    object_method_name_no_variables    { $$ = $1;}
+  | variable_no_objects                { $$ = $1;}
 ;
 
 array_access:
@@ -2412,18 +2661,38 @@ dimmable_variable_no_calls_access:
 ;
 
 variable:
-    variable_without_objects           { $$ = $1;}
+    variable_no_objects                { $$ = $1;}
   | simple_function_call               { $$ = $1;}
   | object_method_call                 { $$ = $1;}
   | class_method_call                  { $$ = $1;}
   | dimmable_variable_access           { $$ = $1;}
-  | variable property_access           { _p->onObjectProperty($$,$1,$2);}
+  | variable object_operator
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
-    property_access                    { _p->onObjectProperty($$,$2,$4);}
+    object_operator
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | static_class_name
     T_DOUBLE_COLON
-    variable_without_objects           { _p->onStaticMember($$,$1,$3);}
+    variable_no_objects                { _p->onStaticMember($$,$1,$3);}
   | callable_variable '('
+    function_call_parameter_list ')'   { _p->onCall($$,1,$1,$3,NULL);}
+  | lambda_or_closure_with_parens '('
     function_call_parameter_list ')'   { _p->onCall($$,1,$1,$3,NULL);}
   | '(' variable ')'                   { $$ = $2;}
 ;
@@ -2433,43 +2702,57 @@ dimmable_variable:
   | object_method_call                 { $$ = $1;}
   | class_method_call                  { $$ = $1;}
   | dimmable_variable_access           { $$ = $1;}
-  | variable
-    property_access_without_variables  { _p->onObjectProperty($$,$1,$2);}
+  | variable object_operator
+    object_property_name_no_variables
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
-    property_access_without_variables  { _p->onObjectProperty($$,$2,$4);}
+    object_operator
+    object_property_name_no_variables
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | callable_variable '('
     function_call_parameter_list ')'   { _p->onCall($$,1,$1,$3,NULL);}
   | '(' variable ')'                   { $$ = $2;}
 ;
 
 callable_variable:
-    variable_without_objects           { $$ = $1;}
+    variable_no_objects                { $$ = $1;}
   | dimmable_variable_access           { $$ = $1;}
   | '(' variable ')'                   { $$ = $2;}
 ;
 
+lambda_or_closure_with_parens:
+    '(' lambda_or_closure ')'          { $$ = $2;}
+;
+
+lambda_or_closure:
+    closure_expression                 { $$ = $1;}
+  | lambda_expression                  { $$ = $1;}
+;
+
 object_method_call:
-    variable T_OBJECT_OPERATOR
-    ident hh_typeargs_opt '('
-    function_call_parameter_list ')'   { _p->onObjectMethodCall($$,$1,$3,$6);}
-  | variable T_OBJECT_OPERATOR
-    variable_without_objects '('
-    function_call_parameter_list ')'   { _p->onObjectMethodCall($$,$1,$3,$5);}
-  | variable T_OBJECT_OPERATOR
-    '{' expr '}' '('
-    function_call_parameter_list ')'   { _p->onObjectMethodCall($$,$1,$4,$7);}
+    variable object_operator
+    object_method_name hh_typeargs_opt '('
+    function_call_parameter_list ')' { _p->onObjectMethodCall($$,$1,$2.num(),$3,$6);}
   | '(' expr_with_parens ')'
-    T_OBJECT_OPERATOR
-    ident hh_typeargs_opt '('
-    function_call_parameter_list ')'   { _p->onObjectMethodCall($$,$2,$5,$8);}
-  | '(' expr_with_parens ')'
-    T_OBJECT_OPERATOR
-    variable_without_objects '('
-    function_call_parameter_list ')'   { _p->onObjectMethodCall($$,$2,$5,$7);}
-  | '(' expr_with_parens ')'
-    T_OBJECT_OPERATOR
-    '{' expr '}' '('
-    function_call_parameter_list ')'   { _p->onObjectMethodCall($$,$2,$6,$9);}
+    object_operator
+    object_method_name hh_typeargs_opt '('
+    function_call_parameter_list ')' { _p->onObjectMethodCall($$,$2,$4.num(),$5,$8);}
 ;
 
 class_method_call:
@@ -2479,7 +2762,7 @@ class_method_call:
     function_call_parameter_list ')'   { _p->onCall($$,0,$3,$6,&$1);}
   | static_class_name
     T_DOUBLE_COLON
-    variable_without_objects '('
+    variable_no_objects '('
     function_call_parameter_list ')'   { _p->onCall($$,1,$3,$5,&$1);}
   | static_class_name
     T_DOUBLE_COLON
@@ -2487,7 +2770,7 @@ class_method_call:
     function_call_parameter_list ')'   { _p->onCall($$,1,$4,$7,&$1);}
 ;
 
-variable_without_objects:
+variable_no_objects:
     reference_variable                 { $$ = $1;}
   | simple_indirect_reference
     reference_variable                 { _p->onIndirectRef($$,$1,$2);}
@@ -2514,23 +2797,61 @@ simple_indirect_reference:
 ;
 
 variable_no_calls:
-    variable_without_objects           { $$ = $1;}
+    variable_no_objects                { $$ = $1;}
   | dimmable_variable_no_calls_access  { $$ = $1;}
-  | variable_no_calls property_access  { _p->onObjectProperty($$,$1,$2);}
+  | variable_no_calls
+    object_operator
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
-    property_access                    { _p->onObjectProperty($$,$2,$4);}
+    object_operator
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | static_class_name
     T_DOUBLE_COLON
-    variable_without_objects           { _p->onStaticMember($$,$1,$3);}
+    variable_no_objects                { _p->onStaticMember($$,$1,$3);}
   | '(' variable ')'                   { $$ = $2;}
 ;
 
 dimmable_variable_no_calls:
   | dimmable_variable_no_calls_access  { $$ = $1;}
-  | variable_no_calls
-    property_access_without_variables  { _p->onObjectProperty($$,$1,$2);}
+  | variable_no_calls object_operator
+    object_property_name_no_variables
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
-    property_access_without_variables  { _p->onObjectProperty($$,$2,$4);}
+    object_operator
+    object_property_name_no_variables
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | '(' variable ')'                   { $$ = $2;}
 ;
 
@@ -2584,13 +2905,13 @@ static_collection_init:
 ;
 non_empty_static_collection_init:
     non_empty_static_collection_init
-    ',' static_scalar T_DOUBLE_ARROW
-    static_scalar                      { _p->onCollectionPair($$,&$1,&$3,$5);}
+    ',' static_expr T_DOUBLE_ARROW
+    static_expr                        { _p->onCollectionPair($$,&$1,&$3,$5);}
   | non_empty_static_collection_init
-    ',' static_scalar                  { _p->onCollectionPair($$,&$1,  0,$3);}
-  | static_scalar T_DOUBLE_ARROW
-    static_scalar                      { _p->onCollectionPair($$,  0,&$1,$3);}
-  | static_scalar                      { _p->onCollectionPair($$,  0,  0,$1);}
+    ',' static_expr                    { _p->onCollectionPair($$,&$1,  0,$3);}
+  | static_expr T_DOUBLE_ARROW
+    static_expr                        { _p->onCollectionPair($$,  0,&$1,$3);}
+  | static_expr                        { _p->onCollectionPair($$,  0,  0,$1);}
 ;
 
 encaps_list:
@@ -2607,8 +2928,16 @@ encaps_var:
     T_VARIABLE                         { _p->onSimpleVariable($$, $1);}
   | T_VARIABLE '['
     encaps_var_offset ']'              { _p->encapRefDim($$, $1, $3);}
-  | T_VARIABLE T_OBJECT_OPERATOR
-    ident                              { _p->encapObjProp($$, $1, $3);}
+  | T_VARIABLE object_operator
+    ident                              { _p->encapObjProp(
+                                           $$,
+                                           $1,
+                                           !$2.num()
+                                            ? HPHP::PropAccessType::Normal
+                                            : HPHP::PropAccessType::NullSafe,
+                                           $3
+                                         );
+                                       }
   | T_DOLLAR_OPEN_CURLY_BRACES
     expr '}'                           { _p->onDynamicVariable($$, $2, 1);}
   | T_DOLLAR_OPEN_CURLY_BRACES
@@ -2625,6 +2954,8 @@ internal_functions:
     T_ISSET '(' variable_list ')'      { UEXP($$,$3,T_ISSET,1);}
   | T_EMPTY '(' variable ')'           { UEXP($$,$3,T_EMPTY,1);}
   | T_EMPTY '(' expr_no_variable ')'   { UEXP($$,$3,'!',1);}
+  | T_EMPTY '(' lambda_or_closure ')'  { UEXP($$,$3,'!',1);}
+  | T_EMPTY '(' lambda_or_closure_with_parens ')' { UEXP($$,$3,'!',1);}
   | T_EMPTY '(' expr_with_parens ')'   { UEXP($$,$3,'!',1);}
   | T_INCLUDE expr                     { UEXP($$,$2,T_INCLUDE,1);}
   | T_INCLUDE_ONCE expr                { UEXP($$,$2,T_INCLUDE_ONCE,1);}
@@ -2656,11 +2987,11 @@ hh_opt_constraint:
 
 hh_type_alias_statement:
     T_TYPE hh_name_with_typevar
-      '=' hh_type ';'                  { $2.setText(_p->nsDecl($2.text()));
+      '=' hh_type ';'                  { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onTypedef($$, $2, $4);
                                          _p->popTypeScope(); }
   | T_NEWTYPE hh_name_with_typevar
-    hh_opt_constraint '=' hh_type ';'  { $2.setText(_p->nsDecl($2.text()));
+    hh_opt_constraint '=' hh_type ';'  { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onTypedef($$, $2, $5);
                                          _p->popTypeScope(); }
 ;
@@ -2687,16 +3018,22 @@ hh_typeargs_opt:
   |                                    { $$.reset(); }
 ;
 
-hh_type_list:
+hh_non_empty_type_list:
     hh_type                            { Token t; t.reset();
                                          _p->onTypeList($1, t);
                                          $$ = $1; }
-  | hh_type_list ',' hh_type           { _p->onTypeList($1, $3);
+  | hh_non_empty_type_list ',' hh_type { _p->onTypeList($1, $3);
                                          $$ = $1; }
 ;
 
+hh_type_list:
+    hh_non_empty_type_list
+    possible_comma                     { $$ = $1; }
+;
+
 hh_func_type_list:
-  hh_type_list ',' T_ELLIPSIS          { $$ = $1; }
+    hh_non_empty_type_list
+    ',' T_ELLIPSIS                     { $$ = $1; }
   | hh_type_list                       { $$ = $1; }
   | T_ELLIPSIS                         { $$.reset(); }
   |                                    { $$.reset(); }
@@ -2707,19 +3044,37 @@ hh_opt_return_type:
   | ':' hh_type                        { only_in_hh_syntax(_p); $$ = $2; }
 ;
 
+hh_constraint:
+    T_AS hh_type
+ |  T_SUPER hh_type
+
 hh_typevar_list:
     hh_typevar_list ','
-    ident                              { _p->addTypeVar($3.text()); }
- |  ident                              { _p->addTypeVar($1.text()); }
+    hh_typevar_variance ident          { _p->addTypeVar($4.text()); }
+ |  hh_typevar_variance ident          { _p->addTypeVar($2.text()); }
  |  hh_typevar_list ','
-    ident T_AS hh_type                 { _p->addTypeVar($3.text()); }
- |  ident T_AS hh_type                 { _p->addTypeVar($1.text()); }
+    hh_typevar_variance ident
+    hh_constraint                      { _p->addTypeVar($4.text()); }
+ |  hh_typevar_variance ident
+    hh_constraint                      { _p->addTypeVar($2.text()); }
+;
+
+hh_typevar_variance:
+    '+'           {}
+|   '-'           {}
+|   /* empty */   {}
 ;
 
 hh_shape_member_type:
     T_CONSTANT_ENCAPSED_STRING
       T_DOUBLE_ARROW
       hh_type                      { validate_shape_keyname($1, _p); }
+ |  class_namespace_string_typeargs
+      T_DOUBLE_COLON
+      ident
+     T_DOUBLE_ARROW
+      hh_type                      { }
+
 ;
 
 hh_non_empty_shape_member_list:
@@ -2737,6 +3092,16 @@ hh_shape_member_list:
 hh_shape_type:
     T_SHAPE
      '(' hh_shape_member_list ')'      { $$.setText("array"); }
+;
+
+hh_access_type_start:
+    class_namespace_string_typeargs         { $$ = $1; }
+;
+hh_access_type:
+    ident T_DOUBLE_COLON hh_access_type { Token t; t.reset();
+                                          _p->onTypeAnnotation($$, $1, t);
+                                          _p->onTypeList($$, $3); }
+  | ident hh_typeargs_opt               { _p->onTypeAnnotation($$, $1, $2); }
 ;
 
 /* extends non_empty_type_decl with some more types */
@@ -2757,6 +3122,11 @@ hh_type:
                                          $1.setText("callable");
                                          _p->onTypeAnnotation($$, $1, t); }
   | hh_shape_type                      { $$ = $1; }
+  | hh_access_type_start
+    T_DOUBLE_COLON
+    hh_access_type                     { only_in_hh_syntax(_p);
+                                         _p->onTypeAnnotation($$, $1, $3);
+                                         _p->onTypeSpecialization($$, 'a'); }
   | T_ARRAY T_TYPELIST_LT hh_type
     T_TYPELIST_GT                      { $1.setText("array");
                                          _p->onTypeAnnotation($$, $1, $3); }
@@ -2774,7 +3144,9 @@ hh_type:
                                         _p->onTypeList($7, $4);
                                         _p->onTypeAnnotation($$, $2, $7);
                                         _p->onTypeSpecialization($$, 'f'); }
-  | '(' hh_type_list ',' hh_type ')'  { only_in_hh_syntax(_p);
+  | '(' hh_type ','
+    hh_non_empty_type_list
+    possible_comma ')'                { only_in_hh_syntax(_p);
                                         _p->onTypeList($2, $4);
                                         Token t; t.reset(); t.setText("array");
                                         _p->onTypeAnnotation($$, t, $2);

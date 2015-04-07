@@ -21,6 +21,7 @@
 #include "hphp/util/logger.h"
 
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/data-walker.h"
 #include "hphp/runtime/base/apc-handle.h"
 #include "hphp/runtime/base/apc-handle-defs.h"
 #include "hphp/runtime/base/externals.h"
@@ -28,7 +29,7 @@
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/ext/ext_apc.h"
+#include "hphp/runtime/ext/apc/ext_apc.h"
 
 namespace HPHP {
 
@@ -50,34 +51,33 @@ APCObject::APCObject(ObjectData* obj, uint32_t propCount)
   : m_handle(KindOfObject)
   , m_cls{make_class(obj->getVMClass())}
   , m_propCount{propCount}
-{
-  m_handle.setIsObj();
-  m_handle.mustCache();
-}
+{}
 
-APCHandle* APCObject::Construct(ObjectData* objectData) {
+APCHandle::Pair APCObject::Construct(ObjectData* objectData) {
   // This function assumes the object and object/array down the tree
   // have no internal references and do not implement the serializable
   // interface.
   assert(!objectData->instanceof(SystemLib::s_SerializableClass));
 
   Array odProps;
-  objectData->o_getArray(odProps, false);
+  objectData->o_getArray(odProps);
   auto const propCount = odProps.size();
 
-  auto const apcObj = new (
-    std::malloc(sizeof(APCObject) + sizeof(Prop) * propCount)
-  ) APCObject(objectData, propCount);
-  if (!propCount) return apcObj->getHandle();
+  auto size = sizeof(APCObject) + sizeof(Prop) * propCount;
+  auto const apcObj = new (std::malloc(size)) APCObject(objectData, propCount);
+  if (!propCount) return {apcObj->getHandle(), size};
 
   auto prop = apcObj->props();
-  for (ArrayIter it(odProps); !it.end(); it.next()) {
+  for (ArrayIter it(odProps); !it.end(); it.next(), ++prop) {
     Variant key(it.first());
     assert(key.isString());
     const Variant& value = it.secondRef();
-    APCHandle *val = nullptr;
     if (!value.isNull()) {
-      val = APCHandle::Create(value, false, true, true);
+      auto val = APCHandle::Create(value, false, true, true);
+      prop->val = val.handle;
+      size += val.size;
+    } else {
+      prop->val = nullptr;
     }
 
     const String& keySD = key.asCStrRef();
@@ -90,22 +90,22 @@ APCHandle* APCObject::Construct(ObjectData* objectData) {
         prop->ctx = nullptr;
       } else {
         // Private.
-        prop->ctx = Unit::lookupClass(cls.get());
+        auto* ctx = Unit::lookupClass(cls.get());
+        if (ctx && ctx->attrs() & AttrUnique) {
+          prop->ctx = ctx;
+        } else {
+          prop->ctx = makeStaticString(cls.get());
+        }
       }
-
       prop->name = makeStaticString(keySD.substr(subLen));
     } else {
       prop->ctx = nullptr;
       prop->name = makeStaticString(keySD.get());
     }
-
-    prop->val = val;
-
-    ++prop;
   }
   assert(prop == apcObj->props() + propCount);
 
-  return apcObj->getHandle();
+  return {apcObj->getHandle(), size};
 }
 
 ALWAYS_INLINE
@@ -117,7 +117,7 @@ APCObject::~APCObject() {
 }
 
 void APCObject::Delete(APCHandle* handle) {
-  if (!handle->getIsObj()) {
+  if (handle->isSerializedObj()) {
     delete APCString::fromHandle(handle);
     return;
   }
@@ -130,9 +130,9 @@ void APCObject::Delete(APCHandle* handle) {
 
 //////////////////////////////////////////////////////////////////////
 
-APCHandle* APCObject::MakeAPCObject(APCHandle* obj, const Variant& value) {
-  if (!value.is(KindOfObject) || obj->getObjAttempted()) {
-    return nullptr;
+APCHandle::Pair APCObject::MakeAPCObject(APCHandle* obj, const Variant& value) {
+  if (!value.is(KindOfObject) || obj->objAttempted()) {
+    return {nullptr, 0};
   }
   obj->setObjAttempted();
   ObjectData *o = value.getObjectData();
@@ -141,19 +141,19 @@ APCHandle* APCObject::MakeAPCObject(APCHandle* obj, const Variant& value) {
   if (features.isCircular() ||
       features.hasCollection() ||
       features.hasSerializableReference()) {
-    return nullptr;
+    return {nullptr, 0};
   }
-  APCHandle* tmp = APCHandle::Create(value, false, true, true);
-  tmp->setObjAttempted();
+  auto tmp = APCHandle::Create(value, false, true, true);
+  tmp.handle->setObjAttempted();
   return tmp;
 }
 
-Variant APCObject::MakeObject(APCHandle* handle) {
-  if (handle->getIsObj()) {
-    return APCObject::fromHandle(handle)->createObject();
+Variant APCObject::MakeObject(const APCHandle* handle) {
+  if (handle->isSerializedObj()) {
+    auto const serObj = APCString::fromHandle(handle)->getStringData();
+    return apc_unserialize(serObj->data(), serObj->size());
   }
-  StringData* serObj = APCString::fromHandle(handle)->getStringData();
-  return apc_unserialize(serObj->data(), serObj->size());
+  return APCObject::fromHandle(handle)->createObject();
 }
 
 Object APCObject::createObject() const {
@@ -190,7 +190,7 @@ Object APCObject::createObject() const {
       }
     }
 
-    auto val = prop->val ? prop->val->toLocal() : null_variant;
+    auto val = prop->val ? prop->val->toLocal() : init_null();
     obj->setProp(const_cast<Class*>(ctx), key, val.asTypedValue(), false);
   }
 

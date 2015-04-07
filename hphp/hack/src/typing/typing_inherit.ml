@@ -19,7 +19,6 @@
 open Utils
 open Nast
 open Typing_defs
-open Silent
 
 module Env = Typing_env
 module Inst = Typing_instantiate
@@ -30,30 +29,24 @@ type env = Env.env
 (*****************************************************************************)
 
 type inherited = {
-    ih_cstr     : class_elt option ;
-    ih_consts   : class_elt SMap.t ;
-    ih_cvars    : class_elt SMap.t ;
-    ih_scvars   : class_elt SMap.t ;
-    ih_methods  : class_elt SMap.t ;
-    ih_smethods : class_elt SMap.t ;
-  }
+  ih_cstr     : class_elt option * bool (* consistency required *);
+  ih_consts   : class_elt SMap.t ;
+  ih_typeconsts : typeconst_type SMap.t ;
+  ih_cvars    : class_elt SMap.t ;
+  ih_scvars   : class_elt SMap.t ;
+  ih_methods  : class_elt SMap.t ;
+  ih_smethods : class_elt SMap.t ;
+}
 
 let empty = {
-  ih_cstr     = None;
+  ih_cstr     = None, false;
   ih_consts   = SMap.empty;
+  ih_typeconsts = SMap.empty;
   ih_cvars    = SMap.empty;
   ih_scvars   = SMap.empty;
   ih_methods  = SMap.empty;
   ih_smethods = SMap.empty;
 }
-
-let desugar ih =
-  ih.ih_cstr,
-  ih.ih_consts,
-  ih.ih_cvars,
-  ih.ih_scvars,
-  ih.ih_methods,
-  ih.ih_smethods
 
 (*****************************************************************************)
 (* Functions used to merge an additional inherited class to the types
@@ -72,16 +65,28 @@ let add_method name sig_ methods =
       (* The method didn't exist so far, let's add it *)
       SMap.add name sig_ methods
   | Some old_sig ->
-      if not (is_abstract_method old_sig) && is_abstract_method sig_
-      (* The method was defined was not abstract, and this one is
-       * abstract. We don't want to override a concrete method with
-       * an abstract one.
+      if ((not (is_abstract_method old_sig) && is_abstract_method sig_)
+          || (is_abstract_method old_sig = is_abstract_method sig_
+          && not (old_sig.ce_synthesized) && sig_.ce_synthesized))
+
+      (* The then-branch of this if is encountered when the method being
+       * added shouldn't *actually* be added. When's that?
+       * In isolation, we can say that
+       *   - We don't want to override a concrete method with
+       *     an abstract one.
+       *   - We don't want to override a method that's actually
+       *     implemented by the programmer with one that's "synthetic",
+       *     e.g. arising merely from a require-extends declaration in
+       *     a trait.
+       * When these two considerations conflict, we give precedence to
+       * abstractness for determining priority of the method.
        *)
       then methods
-      (* We're overwriting a method definition. This is OK when a
-       * naming conflict is parent class vs trait (trait wins!), but
-       * not really OK when the naming conflict is trait vs trait
-       * (we rely on HHVM to catch the error at runtime) *)
+
+      (* Otherwise, we *are* overwriting a method definition. This is
+       * OK when a naming conflict is parent class vs trait (trait
+       * wins!), but not really OK when the naming conflict is trait vs
+       * trait (we rely on HHVM to catch the error at runtime) *)
       else SMap.add name {sig_ with ce_override = false} methods
 
 let add_methods methods' acc =
@@ -90,12 +95,69 @@ let add_methods methods' acc =
 let add_members members acc =
   SMap.fold SMap.add members acc
 
-let add_constructor cstr acc =
-  match cstr with None -> acc | _ -> cstr
+let is_abstract_typeconst x = x.ttc_type = None
+
+let can_override_typeconst x =
+  (is_abstract_typeconst x) || x.ttc_constraint <> None
+
+let add_typeconst name sig_ typeconsts =
+  match SMap.get name typeconsts with
+  | None ->
+      (* The type constant didn't exist so far, let's add it *)
+      SMap.add name sig_ typeconsts
+  (* This covers the following case
+   *
+   * interface I1 { abstract const type T; }
+   * interface I2 { const type T = int; }
+   *
+   * class C implements I1, I2 {}
+   *
+   * Then C::T == I2::T since I2::T is not abstract
+   *)
+  | Some old_sig
+    when not (is_abstract_typeconst old_sig) && (is_abstract_typeconst sig_) ->
+      typeconsts
+  (* This covers the following case
+   *
+   * abstract P { const type T as arraykey = arraykey; }
+   * interface I { const type T = int; }
+   *
+   * class C extends P implements I {}
+   *
+   * Then C::T == I::T since P::T has a constraint and thus can be overridden
+   * by it's child, while I::T cannot be overridden.
+   *)
+  | Some old_sig
+    when not (can_override_typeconst old_sig) && (can_override_typeconst sig_) ->
+      typeconsts
+  (* When a type constant is declared in multiple parents we need to make a
+   * subtle choice of what type we inherit. For example in:
+   *
+   * interface I1 { abstract const type t as Container<int>; }
+   * interface I2 { abstract const type t as KeyedContainer<int, int>; }
+   * abstract class C implements I1, I2 {}
+   *
+   * Depending on the order the interfaces are declared, we may report an error.
+   * Since this could be confusing there is special logic in Typing_extends that
+   * checks for this potentially ambiguous situation and warns the programmer to
+   * explicitly declare T in C.
+   *)
+  | _ ->
+      SMap.add name sig_ typeconsts
+
+let add_constructor (cstr, cstr_consist) (acc, acc_consist) =
+  let ce = match cstr, acc with
+    | None, _ -> acc
+    | Some ce, Some acce when ce.ce_synthesized && not acce.ce_synthesized ->
+      acc
+    | _ -> cstr
+  in ce, cstr_consist || acc_consist
 
 let add_inherited inherited acc = {
   ih_cstr     = add_constructor inherited.ih_cstr acc.ih_cstr;
   ih_consts   = add_members inherited.ih_consts acc.ih_consts;
+  ih_typeconsts =
+    SMap.fold add_typeconst inherited.ih_typeconsts acc.ih_typeconsts;
   ih_cvars    = add_members inherited.ih_cvars acc.ih_cvars;
   ih_scvars   = add_members inherited.ih_scvars acc.ih_scvars;
   ih_methods  = add_methods inherited.ih_methods acc.ih_methods;
@@ -113,8 +175,8 @@ let desugar_class_hint = function
 
 let check_arity pos class_name class_type class_parameters =
   let arity = List.length class_type.tc_tparams in
-  if List.length class_parameters <> arity && not !is_silent_mode
-  then error pos ("The class "^class_name^" expects "^soi arity^" arguments");
+  if List.length class_parameters <> arity
+  then Errors.class_arity pos class_type.tc_pos class_name arity;
   ()
 
 let make_substitution ?this:(this=None) pos class_name class_type class_parameters =
@@ -125,11 +187,52 @@ let make_substitution ?this:(this=None) pos class_name class_type class_paramete
       let this_ty = (fst this, Tgeneric ("this", Some this)) in
       Inst.make_subst_with_this this_ty class_type.tc_tparams class_parameters
 
-let constructor env subst = function
-  | None -> env, None
+let constructor env subst (cstr, consistent) = match cstr with
+  | None -> env, (None, consistent)
   | Some ce ->
     let env, ty = Inst.instantiate subst env ce.ce_type in
-    env, Some {ce with ce_type = ty}
+    env, (Some {ce with ce_type = ty}, consistent)
+
+let map_inherited f inh =
+  {
+    ih_cstr     = (opt_map f (fst inh.ih_cstr)), (snd inh.ih_cstr);
+    ih_typeconsts = inh.ih_typeconsts;
+    ih_consts   = SMap.map f inh.ih_consts;
+    ih_cvars    = SMap.map f inh.ih_cvars;
+    ih_scvars   = SMap.map f inh.ih_scvars;
+    ih_methods  = SMap.map f inh.ih_methods;
+    ih_smethods = SMap.map f inh.ih_smethods;
+  }
+
+(*****************************************************************************)
+(* Code filtering the private members (useful for inheritance) *)
+(*****************************************************************************)
+
+let filter_private x =
+  SMap.fold begin fun name class_elt acc ->
+    match class_elt.ce_visibility with
+    | Vprivate _ -> acc
+    | Vpublic | Vprotected _ -> SMap.add name class_elt acc
+  end x SMap.empty
+
+let chown_private owner =
+  SMap.map begin fun class_elt ->
+    match class_elt.ce_visibility with
+      | Vprivate _ -> {class_elt with ce_visibility = Vprivate owner}
+      | _ -> class_elt end
+
+let apply_fn_to_class_elts fn class_type = {
+  class_type with
+  tc_consts = fn class_type.tc_consts;
+  tc_typeconsts = class_type.tc_typeconsts;
+  tc_cvars = fn class_type.tc_cvars;
+  tc_scvars = fn class_type.tc_scvars;
+  tc_methods = fn class_type.tc_methods;
+  tc_smethods = fn class_type.tc_smethods;
+}
+
+let filter_privates = apply_fn_to_class_elts filter_private
+let chown_privates owner = apply_fn_to_class_elts (chown_private owner)
 
 (*****************************************************************************)
 (* Builds the inherited type when the class lives in Hack *)
@@ -138,7 +241,7 @@ let constructor env subst = function
 let inherit_hack_class c env p class_name class_type argl =
   let self = Typing.get_self_from_c env c in
   let subst = make_substitution ~this:(Some self) p class_name class_type argl in
-  let instantiate = smap_env (Inst.instantiate_ce subst) in
+  let instantiate = SMap.map_env (Inst.instantiate_ce subst) in
   let class_type =
     match class_type.tc_kind with
     | Ast.Ctrait ->
@@ -146,17 +249,21 @@ let inherit_hack_class c env p class_name class_type argl =
         chown_privates (snd c.c_name) class_type
     | Ast.Cnormal | Ast.Cabstract | Ast.Cinterface ->
         filter_privates class_type
+    | Ast.Cenum -> class_type
   in
+  let env, typeconsts = SMap.map_env (Inst.instantiate_typeconst subst)
+    env class_type.tc_typeconsts in
   let env, consts   = instantiate env class_type.tc_consts in
   let env, cvars    = instantiate env class_type.tc_cvars in
   let env, scvars   = instantiate env class_type.tc_scvars in
   let env, methods  = instantiate env class_type.tc_methods in
   let env, smethods = instantiate env class_type.tc_smethods in
-  let env, cstr     = Env.get_construct env class_type in
+  let cstr          = Env.get_construct env class_type in
   let env, cstr     = constructor env subst cstr in
   let result = {
     ih_cstr     = cstr;
     ih_consts   = consts;
+    ih_typeconsts = typeconsts;
     ih_cvars    = cvars;
     ih_scvars   = scvars;
     ih_methods  = methods;
@@ -167,11 +274,27 @@ let inherit_hack_class c env p class_name class_type argl =
 (* mostly copy paste of inherit_hack_class *)
 let inherit_hack_class_constants_only env p class_name class_type argl =
   let subst = make_substitution p class_name class_type argl in
-  let env, consts =
-    smap_env (Inst.instantiate_ce subst) env class_type.tc_consts in
+  let instantiate = SMap.map_env (Inst.instantiate_ce subst) in
+  let env, consts  = instantiate env class_type.tc_consts in
+  let env, typeconsts = SMap.map_env (Inst.instantiate_typeconst subst)
+    env class_type.tc_typeconsts in
   let result = { empty with
     ih_consts   = consts;
+    ih_typeconsts = typeconsts;
   } in
+  env, result
+
+(* This logic deals with importing XHP attributes from an XHP class
+   via the "attribute :foo;" syntax. *)
+let inherit_hack_xhp_attrs_only env p class_name class_type argl =
+  let subst = make_substitution p class_name class_type argl in
+  (* Filter out properties that are not XHP attributes *)
+  let cvars =
+    SMap.fold begin fun name class_elt acc ->
+      if class_elt.ce_is_xhp_attr then SMap.add name class_elt acc else acc
+    end class_type.tc_cvars SMap.empty in
+  let env, cvars = SMap.map_env (Inst.instantiate_ce subst) env cvars in
+  let result = { empty with ih_cvars = cvars; } in
   env, result
 
 (*****************************************************************************)
@@ -179,7 +302,7 @@ let inherit_hack_class_constants_only env p class_name class_type argl =
 let from_class c env hint =
   let pos, class_name, class_params = desugar_class_hint hint in
   let env, class_params = lfold Typing_hint.hint env class_params in
-  let env, class_type = Env.get_class_dep env class_name in
+  let class_type = Env.get_class_dep env class_name in
   match class_type with
   | None ->
       (* The class lives in PHP, we don't know anything about it *)
@@ -192,7 +315,7 @@ let from_class c env hint =
 let from_class_constants_only env hint =
   let pos, class_name, class_params = desugar_class_hint hint in
   let env, class_params = lfold Typing_hint.hint env class_params in
-  let env, class_type = Env.get_class_dep env class_name in
+  let class_type = Env.get_class_dep env class_name in
   match class_type with
   | None ->
       (* The class lives in PHP, we don't know anything about it *)
@@ -200,6 +323,18 @@ let from_class_constants_only env hint =
   | Some class_ ->
       (* The class lives in Hack *)
     inherit_hack_class_constants_only env pos class_name class_ class_params
+
+let from_class_xhp_attrs_only env hint =
+  let pos, class_name, class_params = desugar_class_hint hint in
+  let env, class_params = lfold Typing_hint.hint env class_params in
+  let class_type = Env.get_class_dep env class_name in
+  match class_type with
+  | None ->
+      (* The class lives in PHP, we don't know anything about it *)
+      env, empty
+  | Some class_ ->
+      (* The class lives in Hack *)
+      inherit_hack_xhp_attrs_only env pos class_name class_ class_params
 
 let from_parent env c =
   let extends =
@@ -217,10 +352,17 @@ let from_parent env c =
 
 let from_requirements c (env, acc) reqs =
   let env, inherited = from_class c env reqs in
+  let inherited = map_inherited
+    (fun ce -> { ce with ce_synthesized = true })
+    inherited in
   env, add_inherited inherited acc
 
 let from_trait c (env, acc) uses =
   let env, inherited = from_class c env uses in
+  env, add_inherited inherited acc
+
+let from_xhp_attr_use (env, acc) uses =
+  let env, inherited = from_class_xhp_attrs_only env uses in
   env, add_inherited inherited acc
 
 let from_interface_constants (env, acc) impls =
@@ -237,6 +379,7 @@ let make env c =
   let acc = List.fold_left (from_requirements c) acc c.c_req_extends in
   (* ... are overridden with those inherited from used traits *)
   let acc = List.fold_left (from_trait c) acc c.c_uses in
+  let acc = List.fold_left from_xhp_attr_use acc c.c_xhp_attr_uses in
   (* todo: what about the same constant defined in different interfaces
    * we implement? We should forbid and say "constant already defined".
    * to julien: where is the logic that check for duplicated things?

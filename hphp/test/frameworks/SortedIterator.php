@@ -1,5 +1,4 @@
 <?hh
-// Copyright 2004-present Facebook. All Rights Reserved.
 
 /* While the parameters are of type mixed, going to assume
    they are SplFileInfos for now. This will sort based on
@@ -23,6 +22,8 @@ class SortedIterator extends SplHeap {
     }
   }
   public function compare(mixed $b, mixed $a): int {
+    assert($a instanceof SplFileInfo);
+    assert($b instanceof SplFileInfo);
     return strcmp($a->getPath(), $b->getPath());
   }
 }

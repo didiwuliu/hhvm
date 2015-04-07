@@ -15,70 +15,79 @@
 */
 
 #include "hphp/runtime/base/file-stream-wrapper.h"
-#include "hphp/runtime/base/file-repository.h"
+#include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/plain-file.h"
 #include "hphp/runtime/base/directory.h"
 #include "hphp/runtime/server/static-content-cache.h"
 #include "hphp/system/constants.h"
-#include "hphp/util/file-util.h"
+#include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
+
 #include <memory>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-MemFile* FileStreamWrapper::openFromCache(const String& filename,
-                                          const String& mode) {
+SmartPtr<MemFile> FileStreamWrapper::openFromCache(const String& filename,
+                                                   const String& mode) {
   if (!StaticContentCache::TheFileCache) {
     return nullptr;
   }
 
   String relative =
     FileCache::GetRelativePath(File::TranslatePath(filename).c_str());
-  std::unique_ptr<MemFile> file(NEWOBJ(MemFile)());
+  auto file = makeSmartPtr<MemFile>();
   bool ret = file->open(relative, mode);
   if (ret) {
-    return file.release();
+    return file;
   }
   return nullptr;
 }
 
-File* FileStreamWrapper::open(const String& filename, const String& mode,
-                              int options, const Variant& context) {
-  String fname =
-    !strncmp(filename.data(), "file://", sizeof("file://") - 1)
-    ? filename.substr(sizeof("file://") - 1) : filename;
+SmartPtr<File>
+FileStreamWrapper::open(const String& filename, const String& mode,
+                        int options, const SmartPtr<StreamContext>& context) {
+  String fname;
+  if (StringUtil::IsFileUrl(filename)) {
+    fname = StringUtil::DecodeFileUrl(filename);
+    if (fname.empty()) {
+      raise_warning("invalid file:// URL");
+      return nullptr;
+    }
+  } else {
+    fname = filename;
+  }
 
-  if (MemFile *file = openFromCache(fname, mode)) {
+  if (auto file = openFromCache(fname, mode)) {
     return file;
   }
 
   if (options & File::USE_INCLUDE_PATH) {
     struct stat s;
-    String resolved_fname = Eval::resolveVmInclude(fname.get(), "", &s);
+    String resolved_fname = resolveVmInclude(fname.get(), "", &s);
     if (!resolved_fname.isNull()) {
-        fname = resolved_fname;
+      fname = resolved_fname;
     }
   }
 
-  std::unique_ptr<PlainFile> file(NEWOBJ(PlainFile)());
+  auto file = makeSmartPtr<PlainFile>();
   bool ret = file->open(File::TranslatePath(fname), mode);
   if (!ret) {
     raise_warning("%s", file->getLastError().c_str());
     return nullptr;
   }
-  return file.release();
+  return file;
 }
 
-Directory* FileStreamWrapper::opendir(const String& path) {
-  std::unique_ptr<PlainDirectory> dir(
-    NEWOBJ(PlainDirectory)(File::TranslatePath(path))
-  );
+SmartPtr<Directory> FileStreamWrapper::opendir(const String& path) {
+  auto dir = makeSmartPtr<PlainDirectory>(File::TranslatePath(path));
   if (!dir->isValid()) {
     raise_warning("%s", dir->getLastError().c_str());
     return nullptr;
   }
-  return dir.release();
+  return dir;
 }
 
 int FileStreamWrapper::rename(const String& oldname, const String& newname) {
@@ -93,9 +102,12 @@ int FileStreamWrapper::rename(const String& oldname, const String& newname) {
 }
 
 int FileStreamWrapper::mkdir(const String& path, int mode, int options) {
-  if (options & k_STREAM_MKDIR_RECURSIVE)
-    return mkdir_recursive(path, mode);
-  return ::mkdir(File::TranslatePath(path).data(), mode);
+  if (options & k_STREAM_MKDIR_RECURSIVE) {
+    ERROR_RAISE_WARNING(mkdir_recursive(path, mode));
+    return ret;
+  }
+  ERROR_RAISE_WARNING(::mkdir(File::TranslatePath(path).data(), mode));
+  return ret;
 }
 
 int FileStreamWrapper::mkdir_recursive(const String& path, int mode) {

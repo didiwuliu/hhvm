@@ -25,8 +25,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 DECLARE_BOOST_TYPES(SimpleFunctionCall);
-class SimpleFunctionCall : public FunctionCall {
-public:
+struct SimpleFunctionCall final : FunctionCall {
   static void InitFunctionTypeMap();
 
 public:
@@ -36,7 +35,6 @@ public:
 
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
   ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
-  ExpressionPtr postOptimize(AnalysisResultConstPtr ar);
   void deepCopy(SimpleFunctionCallPtr exp);
 
   bool isDefineWithoutImpl(AnalysisResultConstPtr ar);
@@ -53,8 +51,6 @@ public:
 
   // define(<literal-string>, <scalar>);
   bool isSimpleDefine(StringData **name, TypedValue *value) const;
-  virtual TypePtr inferAndCheck(AnalysisResultPtr ar, TypePtr type,
-                                bool coerce);
 
   virtual int getLocalEffects() const;
 
@@ -63,7 +59,6 @@ public:
 
   virtual void beforeCheck(AnalysisResultPtr ar) {}
 
-  void addDependencies(AnalysisResultPtr ar);
   void addLateDependencies(AnalysisResultConstPtr ar);
   void setSafeCall(int flag) { m_safe = flag; }
   void setSafeDefault(ExpressionPtr def) { m_safeDef = def; }
@@ -89,7 +84,7 @@ public:
   void changeToBytecode() {
     m_changedToBytecode = true;
   }
-  virtual bool allowCellByRef() const override {
+  bool hasBeenChangedToBytecode() {
     return m_changedToBytecode;
   }
 
@@ -100,6 +95,7 @@ protected:
     Create,
     VariableArgument,
     Extract,
+    Assert,
     Compact,
     StaticCompact, // compact() with statically known variable names
     ShellExec,
@@ -120,7 +116,6 @@ protected:
   FunType m_type;
   unsigned m_dynamicConstant : 1;
   unsigned m_builtinFunction : 1;
-  unsigned m_invokeFewArgsDecision : 1;
   unsigned m_dynamicInvoke : 1;
   unsigned m_transformed : 1;
   unsigned m_changedToBytecode : 1; // true if it morphed into a bytecode
@@ -143,7 +138,6 @@ private:
   void mungeIfSpecialFunction(AnalysisResultConstPtr ar, FileScopePtr fs);
 
   std::string m_localThis;
-  void *m_extra; // e.g., raw pointer to the symbol defined
 };
 
 SimpleFunctionCallPtr NewSimpleFunctionCall(

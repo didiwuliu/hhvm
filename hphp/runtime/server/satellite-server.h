@@ -18,6 +18,7 @@
 #define incl_HPHP_SATELLITE_SERVER_H_
 
 #include "hphp/util/hdf.h"
+#include "hphp/runtime/base/ini-setting.h"
 
 #include <chrono>
 
@@ -73,7 +74,7 @@ public:
   static bool checkMainURL(const std::string& path);
 
 public:
-  explicit SatelliteServerInfo(Hdf hdf);
+  explicit SatelliteServerInfo(const IniSetting::Map& ini, Hdf hdf);
 
   const std::string &getName() const { return m_name;}
   SatelliteServer::Type getType() const { return m_type;}
@@ -94,6 +95,7 @@ public:
   const std::string &getPassword() const { return m_password;}
   const std::set<std::string> &getPasswords() const { return m_passwords;}
   bool alwaysReset() const { return m_alwaysReset;}
+  const std::set<std::string> &getFunctions() const { return m_functions; }
 
 protected:
   std::string m_name;
@@ -109,6 +111,7 @@ protected:
   std::string m_password;
   std::set<std::string> m_passwords;
   bool m_alwaysReset = false;
+  std::set<std::string> m_functions;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

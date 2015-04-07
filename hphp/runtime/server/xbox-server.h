@@ -17,14 +17,17 @@
 #ifndef incl_HPHP_XBOX_SERVER_H_
 #define incl_HPHP_XBOX_SERVER_H_
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/server/satellite-server.h"
 #include "hphp/runtime/server/server-task-event.h"
+#include "hphp/runtime/server/transport.h"
+#include "hphp/util/synchronizable.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+class Array;
 struct XboxServerInfo;
 class RPCRequestHandler;
 class XboxTransport;
@@ -68,7 +71,7 @@ public:
 
 class XboxServerInfo : public SatelliteServerInfo {
 public:
-  XboxServerInfo() : SatelliteServerInfo(Hdf()) {
+  XboxServerInfo() : SatelliteServerInfo(IniSetting::Map::object, Hdf()) {
     m_type = SatelliteServer::Type::KindOfXboxServer;
     m_name = "xbox";
     reload();
@@ -101,6 +104,10 @@ public:
   virtual const char *getUrl();
   virtual const char *getRemoteHost() { return "127.0.0.1"; }
   virtual uint16_t getRemotePort() { return 0; }
+  virtual const std::string& getServerAddr() {
+    auto const& ipv4 = RuntimeOption::GetServerPrimaryIPv4();
+    return ipv4.empty() ? RuntimeOption::GetServerPrimaryIPv6() : ipv4;
+  }
 
   /**
    * Request data.
@@ -119,7 +126,8 @@ public:
   virtual void addHeaderImpl(const char *name, const char *value) {}
   virtual void removeHeaderImpl(const char *name) {}
 
-  virtual void sendImpl(const void *data, int size, int code, bool chunked);
+  virtual void sendImpl(const void *data, int size, int code, bool chunked,
+                        bool eom);
   virtual void onSendEndImpl();
 
   /**

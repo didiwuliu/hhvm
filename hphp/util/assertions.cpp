@@ -13,29 +13,76 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/util/assertions.h"
 
+#include <folly/Format.h>
+
+#include <cstdio>
+#include <functional>
+#include <iostream>
+#include <string>
+#include <vector>
+
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
 
 static AssertFailLogger s_logger;
 
-// In builds without NDEBUG, we don't have __assert_fail from the GNU
-// library, so we implement it here for always_assert().
-void impl_assert_fail(const char* e, const char* file,
-                      unsigned int line, const char* func) {
-  fprintf(stderr, "%s:%d: %s: assertion `%s' failed.", file, line, func, e);
-  std::abort();
+__thread AssertDetailImpl* AssertDetailImpl::s_head = nullptr;
+
+///////////////////////////////////////////////////////////////////////////////
+
+bool AssertDetailImpl::log_impl(const AssertDetailImpl* adi) {
+  if (!adi) return false;
+  log_impl(adi->m_next);
+
+  auto const title = folly::format("{:-^80}\n", adi->m_name).str();
+  auto const msg = adi->run();
+
+  fprintf(stderr, "\n%s%s\n", title.c_str(), msg.c_str());
+  if (s_logger) s_logger(title.c_str(), msg);
+
+  return true;
 }
 
-void assert_fail_log(const char* title, const std::string& msg) {
+bool AssertDetailImpl::log() { return log_impl(s_head); }
+
+//////////////////////////////////////////////////////////////////////
+
+void assert_log_failure(const char* e, const std::string& msg) {
+  fprintf(stderr, "\nAssertion failure: %s\n%s\n", e, msg.c_str());
+
   if (s_logger) {
-    s_logger(title, msg);
+    s_logger("Assertion Failure", e);
+    if (!msg.empty()) {
+      s_logger("Assertion Message", msg);
+    }
   }
-  fprintf(stderr, "\nAssertion failure: %s\n%s\n\n", title, msg.c_str());
+  auto const detailed = AssertDetailImpl::log();
+  fprintf(stderr, "\n");
+
+  // Reprint the original message, so readers don't necessarily have to page up
+  // through all the detail to find it.  We also printed it first, just in case
+  // one of the detailers wanted to segfault.
+  if (detailed) {
+    fprintf(stderr, "\nAssertion failure: %s\n%s\n", e, msg.c_str());
+  }
+}
+
+void assert_fail(const char* e, const char* file,
+                 unsigned int line, const char* func,
+                 const std::string& msg) {
+  auto const assertion = folly::format("{}:{}: {}: assertion `{}' failed.",
+                                       file, line, func, e).str();
+  assert_log_failure(assertion.c_str(), msg);
+
+  std::abort();
 }
 
 void register_assert_fail_logger(AssertFailLogger l) {
   s_logger = l;
 }
 
+///////////////////////////////////////////////////////////////////////////////
 }

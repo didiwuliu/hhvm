@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_MSGFMT_H
 #define incl_HPHP_ICU_MSGFMT_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/umsg.h>
@@ -44,7 +44,7 @@ public:
     return !m_namedParts.empty() || !m_numericParts.empty();
   }
 
-  static MessageFormatter* Get(Object obj) {
+  static MessageFormatter* Get(ObjectData* obj) {
     return GetData<MessageFormatter>(obj, s_MessageFormatter);
   }
 

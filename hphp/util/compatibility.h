@@ -28,6 +28,8 @@ namespace HPHP {
 
 #define PHP_DIR_SEPARATOR '/'
 
+extern __thread int64_t s_extra_request_microseconds;
+
 #if defined(__APPLE__) || defined(__FreeBSD__)
 char *strndup(const char* str, size_t len);
 int dprintf(int fd, const char *format, ...) ATTRIBUTE_PRINTF(2,3);
@@ -45,6 +47,20 @@ int64_t gettime_diff_us(const timespec &start, const timespec &end);
  * values.
  */
 int fadvise_dontneed(int fd, off_t len);
+
+#ifdef __CYGWIN__
+
+typedef struct {
+  const char *dli_fname;
+  void *dli_fbase;
+  const char *dli_sname;
+  void *dli_saddr;
+} Dl_info;
+
+int dladdr(const void *addr, Dl_info *info);
+int backtrace (void **buffer, int size);
+
+#endif
 
 //////////////////////////////////////////////////////////////////////
 

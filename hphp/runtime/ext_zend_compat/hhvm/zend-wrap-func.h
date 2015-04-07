@@ -17,13 +17,14 @@
 #ifndef incl_HPHP_EXT_ZEND_COMPAT_H_
 #define incl_HPHP_EXT_ZEND_COMPAT_H_
 
+#ifdef ENABLE_ZEND_COMPAT
+
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/base/macros.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/ini-setting.h"
-#include "hphp/runtime/ext_zend_compat/hhvm/ZendExceptionStore.h"
-#include "hphp/runtime/ext_zend_compat/hhvm/ZendExecutionStack.h"
+#include "hphp/runtime/ext_zend_compat/hhvm/zend-exception-store.h"
+#include "hphp/runtime/ext_zend_compat/hhvm/zend-execution-stack.h"
 #include "hphp/runtime/ext_zend_compat/hhvm/zval-helpers.h"
 // zend.h is way to big to include here
 
@@ -60,5 +61,16 @@ TypedValue* zend_wrap_func(ActRec* ar);
 
 ///////////////////////////////////////////////////////////////////////////////
 }
+#else
+
+namespace HPHP {
+  inline void zBoxAndProxy(TypedValue* arg) {}
+  inline void zBoxAndProxy(const TypedValue* arg) {}
+}
+
+#include "hphp/runtime/vm/native.h"
+#define zend_wrap_func Native::unimplementedWrapper
+
+#endif // ENABLE_ZEND_COMPAT
 
 #endif // incl_HPHP_EXT_ZEND_COMPAT_H_

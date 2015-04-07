@@ -13,15 +13,17 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/debugger/cmd/cmd_variable.h"
 
-#include "hphp/runtime/base/hphp-system.h"
-#include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/debugger/cmd/cmd_where.h"
-#include "hphp/runtime/ext/ext_asio.h"
-#include "hphp/runtime/ext/ext_continuation.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
-#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
+#include "hphp/runtime/debugger/debugger_client.h"
+#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_asio.h"
+#include "hphp/runtime/ext/asio/waitable-wait-handle.h"
+#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/vm/runtime.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -51,7 +53,7 @@ void CmdVariable::recvImpl(DebuggerThriftBuffer &thrift) {
     thrift.read(sdata);
     auto error = DebuggerWireHelpers::WireUnserialize(sdata, m_variables);
     if (error != DebuggerWireHelpers::NoError) {
-      m_variables = null_array;
+      m_variables.reset();
       if (error != DebuggerWireHelpers::HitLimit || m_version == 0) {
         // Unexpected error. Log it.
         m_wireError = sdata;
@@ -131,7 +133,7 @@ void CmdVariable::PrintVariable(DebuggerClient &client, const String& varName) {
   }
 }
 
-const StaticString s_http_response_header("http_response_header");
+const StaticString s_HTTP_RAW_POST_DATA("HTTP_RAW_POST_DATA");
 const StaticString s_omitted("...(omitted)");
 
 
@@ -151,7 +153,7 @@ void CmdVariable::PrintVariables(DebuggerClient &client, const Array& variables,
       CmdVariable cmd(client.isStackTraceAsync()
         ? KindOfVariableAsync : KindOfVariable);
       cmd.m_frame = frame;
-      cmd.m_variables = null_array;
+      cmd.m_variables.reset();
       cmd.m_varName = name;
       cmd.m_filter = text;
       cmd.m_version = 2;
@@ -196,8 +198,8 @@ void CmdVariable::PrintVariables(DebuggerClient &client, const Array& variables,
         client.output("$%s = %s", name.data(), value.data());
       }
 
-      // we know s_http_response_header is the last system global
-      if (global && name == s_http_response_header) {
+      // we know s_HTTP_RAW_POST_DATA is the last system global
+      if (global && name == s_HTTP_RAW_POST_DATA) {
         client.output("%s", "");
         system = false;
       }
@@ -243,6 +245,7 @@ void CmdVariable::onClient(DebuggerClient &client) {
 }
 
 const StaticString s_GLOBALS("GLOBALS");
+const StaticString s_this("this");
 
 Array CmdVariable::GetGlobalVariables() {
   Array ret = g_context->m_globalVarEnv->getDefinedVariables();
@@ -264,7 +267,7 @@ static c_AsyncFunctionWaitHandle *objToContinuationWaitHandle(Object o) {
 
 static
 c_AsyncFunctionWaitHandle *getWaitHandleAtAsyncStackPosition(int position) {
-  auto top = f_asio_get_running();
+  auto top = HHVM_FN(asio_get_running)();
 
   if (top.isNull()) {
     return nullptr;
@@ -292,7 +295,7 @@ static Array getVariables(const ActRec *fp) {
       if (ptv->m_type == KindOfUninit) {
         continue;
       }
-      Variant name(func->localVarName(id));
+      Variant name(func->localVarName(id), Variant::StaticStrInit{});
       ret.add(name, tvAsVariant(ptv));
     }
     return ret.toArray();
@@ -305,7 +308,7 @@ bool CmdVariable::onServer(DebuggerProxy &proxy) {
     auto frame = getWaitHandleAtAsyncStackPosition(m_frame);
 
     if (frame != nullptr) {
-      auto fp = frame->getActRec();
+      auto fp = frame->actRec();
       if (fp != nullptr) {
         m_variables = getVariables(fp);
       }
@@ -317,6 +320,16 @@ bool CmdVariable::onServer(DebuggerProxy &proxy) {
   } else {
     m_variables = g_context->getLocalDefinedVariables(m_frame);
     m_global = g_context->getVarEnv(m_frame) == g_context->m_globalVarEnv;
+    auto oThis = g_context->getThis();
+    if (nullptr != oThis) {
+      TypedValue tvThis;
+
+      tvThis.m_type = KindOfObject;
+      tvThis.m_data.pobj = oThis;
+
+      Variant thisName(s_this);
+      m_variables.add(thisName, tvAsVariant(&tvThis));
+    }
   }
 
   if (m_global) {

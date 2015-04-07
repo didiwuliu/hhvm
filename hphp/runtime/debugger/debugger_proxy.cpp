@@ -15,21 +15,25 @@
 */
 #include "hphp/runtime/debugger/debugger_proxy.h"
 
-#include <boost/lexical_cast.hpp>
 #include <exception>
 #include <map>
 #include <stack>
 #include <vector>
+
+#include <folly/Conv.h>
 
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/debugger/cmd/cmd_machine.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/debugger/debugger_hook_handler.h"
+#include "hphp/runtime/debugger/dummy_sandbox.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/ext/ext_socket.h"
+#include "hphp/runtime/ext/sockets/ext_sockets.h"
 #include "hphp/runtime/vm/debugger-hook.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/process.h"
 #include "hphp/util/logger.h"
 
@@ -39,10 +43,9 @@ namespace HPHP { namespace Eval {
 TRACE_SET_MOD(debugger);
 
 DebuggerProxy::DebuggerProxy(SmartPtr<Socket> socket, bool local)
-    : m_stopped(false), m_local(local), m_dummySandbox(nullptr),
-      m_hasBreakPoints(false), m_threadMode(Normal), m_thread(0),
+    : m_local(local),
       m_signalThread(this, &DebuggerProxy::pollSignal),
-      m_okayToPoll(true), m_signum(CmdSignal::SignalNone) {
+      m_signum(CmdSignal::SignalNone) {
   TRACE(2, "DebuggerProxy::DebuggerProxy\n");
   m_thrift.create(socket);
   m_dummyInfo = DSandboxInfo::CreateDummyInfo((int64_t)this);
@@ -147,8 +150,7 @@ std::string DebuggerProxy::getSandboxId() {
 void DebuggerProxy::getThreads(std::vector<DThreadInfoPtr> &threads) {
   TRACE(2, "DebuggerProxy::getThreads\n");
   Lock lock(this);
-  std::stack<void *> &interrupts =
-    ThreadInfo::s_threadInfo->m_reqInjectionData.interrupts;
+  auto& interrupts = RID().interrupts;
   assert(!interrupts.empty());
   if (!interrupts.empty()) {
     CmdInterrupt *tint = (CmdInterrupt*)interrupts.top();
@@ -229,6 +231,9 @@ void DebuggerProxy::switchThreadMode(ThreadMode mode,
 }
 
 void DebuggerProxy::startDummySandbox() {
+  Lock lock(this);
+  if (m_stopped) return;
+
   TRACE(2, "DebuggerProxy::startDummySandbox\n");
   m_dummySandbox =
     new DummySandbox(this, RuntimeOption::DebuggerDefaultSandboxPath,
@@ -242,10 +247,11 @@ void DebuggerProxy::notifyDummySandbox() {
 }
 
 void DebuggerProxy::setBreakPoints(
-    std::vector<BreakPointInfoPtr> &breakpoints) {
+  std::vector<BreakPointInfoPtr>& breakpoints
+) {
   TRACE(2, "DebuggerProxy::setBreakPoints\n");
-  // Hold the break mutex while we update the proxy's state. There's no need
-  // to hold it over the longer operation to set breakpoints in each file later.
+  // Hold the break mutex while we update the proxy's state. There's no need to
+  // hold it over the longer operation to set breakpoints in each file later.
   {
     WriteLock lock(m_breakMutex);
     // breakpoints holds a list of fresh new BreakPointInfo objects that
@@ -275,7 +281,7 @@ void DebuggerProxy::setBreakPoints(
     m_breakpoints = breakpoints;
     m_hasBreakPoints = !m_breakpoints.empty();
   }
-  phpSetBreakPoints(this);
+  proxySetBreakPoints(this);
 }
 
 void DebuggerProxy::getBreakPoints(
@@ -384,6 +390,9 @@ void DebuggerProxy::disableSignalPolling() {
 }
 
 void DebuggerProxy::startSignalThread() {
+  Lock lock(this);
+  if (m_stopped) return;
+
   TRACE(2, "DebuggerProxy::startSignalThread\n");
   m_signalThread.start();
 }
@@ -478,8 +487,8 @@ void DebuggerProxy::pollSignal() {
 // Grab the ip address and port of the client that is connected to this proxy.
 bool DebuggerProxy::getClientConnectionInfo(VRefParam address,
                                             VRefParam port) {
-  Resource s(getSocket().get());
-  return f_socket_getpeername(s, address, port);
+  Resource s(m_thrift.getSocket().get());
+  return HHVM_FN(socket_getpeername)(s, address, port);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -686,7 +695,7 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
     if (res) {
       TRACE_RB(2, "Proxy got cmd type %d\n", res->getType());
       Debugger::UsageLog("server", getSandboxId(),
-                         boost::lexical_cast<std::string>(res->getType()));
+                         folly::to<std::string>(res->getType()));
       // Any control flow command gets installed here and we continue execution.
       m_flow = std::dynamic_pointer_cast<CmdFlowControl>(res);
       if (m_flow) {
@@ -798,7 +807,7 @@ int DebuggerProxy::getRealStackDepth() {
   TRACE(2, "DebuggerProxy::getRealStackDepth\n");
   int depth = 0;
   auto const context = g_context.getNoCheck();
-  auto fp = context->getFP();
+  auto fp = vmfp();
   if (!fp) return 0;
 
   while (fp != nullptr) {
@@ -811,13 +820,11 @@ int DebuggerProxy::getRealStackDepth() {
 int DebuggerProxy::getStackDepth() {
   TRACE(2, "DebuggerProxy::getStackDepth\n");
   int depth = 0;
-  auto const context = g_context.getNoCheck();
-  auto fp = context->getFP();
+  auto fp = vmfp();
   if (!fp) return 0;
-  ActRec *prev = fp->arGetSfp();
-  while (fp != prev) {
-    fp = prev;
-    prev = fp->arGetSfp();
+  fp = fp->sfp();
+  while (fp) {
+    fp = fp->sfp();
     depth++;
   }
   return depth;

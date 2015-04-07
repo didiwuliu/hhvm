@@ -22,6 +22,7 @@ namespace Strings {
 
 const char* const FATAL_NULL_THIS = "$this is null";
 const char* const WARN_NULL_THIS = "Undefined variable: this";
+const char* const ASSIGN_THIS_ERROR = "Cannot re-assign $this";
 const char* const FUNCTION_ALREADY_DEFINED = "Function already defined: %s";
 const char* const CONSTANT_ALREADY_DEFINED = "Constant %s already defined";
 const char* const CONSTANTS_MUST_BE_SCALAR =
@@ -48,14 +49,17 @@ const char* const CANNOT_USE_SCALAR_AS_ARRAY =
   "Cannot use a scalar value as an array";
 const char* const CREATING_DEFAULT_OBJECT =
   "Creating default object from empty value";
+const char* const NULLSAFE_PROP_WRITE_ERROR =
+  "?-> is not allowed in write context";
+const char* const NULLSAFE_THIS_BASE_ERROR = "?-> is not allowed with $this";
 const char* const FUNCTION_NAME_MUST_BE_STRING =
   "Function name must be a string";
 const char* const METHOD_NAME_MUST_BE_STRING =
   "Method name must be a string";
 const char* const MISSING_ARGUMENT =
-  "%s() expects exactly 1 parameter, %d given";
+  "%s() expects %s 1 parameter, %d given";
 const char* const MISSING_ARGUMENTS =
-  "%s() expects exactly %d parameters, %d given";
+  "%s() expects %s %d parameters, %d given";
 const char* const CANT_UNSET_STRING =
   "Cannot unset string offsets";
 const char* const OP_NOT_SUPPORTED_STRING =
@@ -64,7 +68,7 @@ const char* const ASYNC_WITHOUT_BODY =
   "Cannot declare %s method %s::%s() async; async is only meaningful"
   " when it modifies a method body";
 const char* const PICK_ACCESS_MODIFIER =
-  "Cannot declare more than one access modifier";
+  "Multiple access type modifiers are not allowed";
 const char* const TRAITS_UNKNOWN_TRAIT =
   "Unknown trait '%s'";
 const char* const TRAITS_UNKNOWN_TRAIT_METHOD =
@@ -73,10 +77,10 @@ const char* const METHOD_IN_MULTIPLE_TRAITS =
   "Method '%s' declared in multiple traits";
 const char* const TRAIT_REQ_EXTENDS =
   "Class '%s' required to extend class '%s'"
-  " by trait '%s' (via %s)";
+  " by trait '%s'";
 const char* const TRAIT_REQ_IMPLEMENTS =
   "Class '%s' required to implement interface '%s'"
-  " by trait '%s' (via %s)";
+  " by trait '%s'";
 const char* const TRAIT_BAD_REQ_EXTENDS =
   "Trait '%s' requires extension of '%s', but %s "
   "is not an extendable class";

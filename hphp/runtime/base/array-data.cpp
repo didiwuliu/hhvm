@@ -17,24 +17,22 @@
 
 #include <vector>
 #include <array>
-#include <boost/lexical_cast.hpp>
 #include <tbb/concurrent_hash_map.h>
 
 #include "hphp/util/exception.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/empty-array.h"
 #include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/struct-array.h"
 #include "hphp/runtime/base/array-common.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/macros.h"
 #include "hphp/runtime/base/apc-local-array.h"
 #include "hphp/runtime/base/comparisons.h"
-#include "hphp/runtime/vm/name-value-table-wrapper.h"
+#include "hphp/runtime/vm/globals-array.h"
 #include "hphp/runtime/base/proxy-array.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/mixed-array.h"
@@ -59,9 +57,16 @@ ArrayData* ArrayData::GetScalarArray(ArrayData* arr) {
 ArrayData* ArrayData::GetScalarArray(ArrayData* arr, const std::string& key) {
   if (arr->empty()) return staticEmptyArray();
   assert(key == f_serialize(arr).toCppString());
+
   ArrayDataMap::accessor acc;
   if (s_arrayDataMap.insert(acc, key)) {
-    ArrayData *ad = arr->nonSmartCopy();
+    ArrayData* ad;
+
+    if (arr->isVectorData() && !arr->isPacked()) {
+      ad = PackedArray::NonSmartConvert(arr);
+    } else {
+      ad = arr->nonSmartCopy();
+    }
     ad->setStatic();
     ad->onSetEvalScalar();
     acc->second = ad;
@@ -79,7 +84,7 @@ static ArrayData* ZSetStrThrow(ArrayData* ad, StringData* k, RefData* v) {
   throw FatalErrorException("Unimplemented ArrayData::ZSetStr");
 }
 
-static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v) {
+static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v, int64_t* key_ptr) {
   throw FatalErrorException("Unimplemented ArrayData::ZAppend");
 }
 
@@ -87,10 +92,11 @@ static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v) {
 
 #define DISPATCH(entry)                         \
   { PackedArray::entry,                         \
-    MixedArray::entry,                           \
-    APCLocalArray::entry,                       \
+    StructArray::entry,                         \
+    MixedArray::entry,                          \
     EmptyArray::entry,                          \
-    NameValueTableWrapper::entry,               \
+    APCLocalArray::entry,                       \
+    GlobalsArray::entry,                        \
     ProxyArray::entry                           \
   },
 
@@ -127,7 +133,7 @@ static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v) {
  *   we want to change this to make callsites cheaper.
  */
 
-extern const ArrayFunctions g_array_funcs = {
+extern const ArrayFunctions g_array_funcs_unmodified = {
   /*
    * void Release(ArrayData*)
    *
@@ -137,7 +143,7 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(Release)
 
   /*
-   * TypedValue* NvGetInt(const ArrayData*, int64_t key)
+   * const TypedValue* NvGetInt(const ArrayData*, int64_t key)
    *
    *   Lookup a value in an array using an integer key.  Returns
    *   nullptr if the key is not in the array.
@@ -145,7 +151,7 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(NvGetInt)
 
   /*
-   * TypedValue* NvGetStr(const ArrayData*, const StringData*)
+   * const TypedValue* NvGetStr(const ArrayData*, const StringData*)
    *
    *   Lookup a value in an array using a string key.  The string key
    *   must not be an integer-like string.  Returns nullptr if the key
@@ -162,7 +168,7 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(NvGetKey)
 
   /*
-   * ArrayData* SetInt(ArrayData*, int64_t key, const Variant& v, bool copy)
+   * ArrayData* SetInt(ArrayData*, int64_t key, Cell v, bool copy)
    *
    *   Set a value in the array for an integer key.  This function has
    *   copy/grow semantics.
@@ -170,7 +176,7 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(SetInt)
 
   /*
-   * ArrayData* SetStr(ArrayData*, StringData*, const Variant& v, bool copy)
+   * ArrayData* SetStr(ArrayData*, StringData*, Cell v, bool copy)
    *
    *   Set a value in the array for a string key.  The string must not
    *   be an integer-like string.  This function has copy/grow
@@ -181,15 +187,15 @@ extern const ArrayFunctions g_array_funcs = {
   /*
    * size_t Vsize(const ArrayData*)
    *
-   *   This entry point essentially is only for NameValueTableWrapper;
+   *   This entry point essentially is only for GlobalsArray and ProxyArray;
    *   all the other cases are not_reached().
    *
-   *   Because of particulars of how NameValueTableWrapper works,
+   *   Because of particulars of how GlobalsArray works,
    *   determining the size of the array is an O(N) operation---we set
    *   the size field in the generic ArrayData header to -1 in that
    *   case and dispatch through this entry point.  ProxyArray also
    *   always involves virtual size, because of the possibility that
-   *   it could be proxying a NameValueTableWrapper.
+   *   it could be proxying a GlobalsArray.
    */
   DISPATCH(Vsize)
 
@@ -258,6 +264,19 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(LvalNew)
 
   /*
+   * ArrayData* LvalNewRef(ArrayData*, Variant*& out, bool copy)
+   */
+  {
+    PackedArray::LvalNewRef,
+    StructArray::LvalNew,
+    MixedArray::LvalNew,
+    EmptyArray::LvalNew,
+    APCLocalArray::LvalNew,
+    GlobalsArray::LvalNew,
+    ProxyArray::LvalNew,
+  },
+
+  /*
    * ArrayData* SetRefInt(ArrayData*, int64_t key, Variant& v, bool copy)
    *
    *   Binding set with an integer key.  Box `v' if it is not already
@@ -277,8 +296,8 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(SetRefStr)
 
   /*
-   * ArrayData* AddInt(ArrayData*, int64_t key, const Variant&, bool copy)
-   * ArrayData* AddStr(ArrayData*, StringData* key, const Variant&, bool copy)
+   * ArrayData* AddInt(ArrayData*, int64_t key, Cell, bool copy)
+   * ArrayData* AddStr(ArrayData*, StringData* key, Cell, bool copy)
    *
    *   These functions have the same effects as SetInt and SetStr,
    *   respectively, except that the array may assume that it does not
@@ -307,35 +326,43 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(RemoveStr)
 
   /*
-   * ssize_t IterBegin(const ArrayData*)
    * ssize_t IterEnd(const ArrayData*)
    *
-   *   Array positions are represented as an opaque ssize_t.
-   *   IterBegin returns the position of the first element in the
-   *   array, and IterEnd returns the position of the last element in
-   *   the array.  Either function may return ArrayData::invalid_index
-   *   if there is no first or last element.
+   *   Returns the canonical invalid position for this array.  Note
+   *   that if elements are added or removed from the array, the value
+   *   of the array's canonical invalid position may change.
+   *
+   * ssize_t IterBegin(const ArrayData*)
+   *
+   *   Returns the position of the first element, or the canonical
+   *   invalid position if this array is empty.
+   *
+   * ssize_t IterLast(const ArrayData*)
+   *
+   *   Returns the position of the last element, or the canonical
+   *   invalid position if this array is empty.
    */
   DISPATCH(IterBegin)
+  DISPATCH(IterLast)
   DISPATCH(IterEnd)
 
   /*
-   * ssize_t IterAdvance(const ArrayData*, ssize_t pos)
+   * ssize_t IterAdvance(const ArrayData*, size_t pos)
    *
-   *   Advance `pos' to the next position in the array.  `pos' may be
-   *   invalid_index, in which case this function returns the position
-   *   of the first element in the array.  Returns invalid_index if
-   *   there is no next position in the array.
+   *   Returns the position of the element that comes after pos, or the
+   *   canonical invalid position if there are no more elements after pos.
+   *   If pos is the canonical invalid position, this method will return
+   *   the canonical invalid position.
    */
   DISPATCH(IterAdvance)
 
   /*
-   * ssize_t IterRewind(const ArrayData*, ssize_t pos)
+   * ssize_t IterRewind(const ArrayData*, size_t pos)
    *
-   *   Move `pos' to the position of the previous element in the
-   *   array.  `pos' may be invalid_index, in which case this function
-   *   returns invalid_index.  Returns invalid_index if there is no
-   *   previous position in the array.
+   *   Returns the position of the element that comes before pos, or the
+   *   canonical invalid position if there are no elements before pos. If
+   *   pos is the canonical invalid position, no guarantees are made about
+   *   what this method returns.
    */
   DISPATCH(IterRewind)
 
@@ -365,11 +392,13 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(AdvanceMArrayIter)
 
   /*
-   * ArrayData* EscalateForSort(ArrayData*)
+   * ArrayData* EscalateForSort(ArrayData*, SortFunction)
    *
    *   Must be called before calling any of the sort routines on an
-   *   array.  This gives arrays a chance to change to a kind that
-   *   supports sorting.
+   *   array. This gives arrays a chance to change to a kind that
+   *   supports sorting. If the original ArrayData is returned, the
+   *   refcount is unchanged; otherwise the returned ArrayData has
+   *   refcount of 0.
    */
   DISPATCH(EscalateForSort)
 
@@ -429,10 +458,10 @@ extern const ArrayFunctions g_array_funcs = {
   /*
    * ArrayData* Copy(const ArrayData*)
    *
-   *   Explicitly request that an array be copyied.  This API does
+   *   Explicitly request that an array be copied.  This API does
    *   /not/ actually guarantee a copy occurs.
    *
-   *   (E.g. NameValueTableWrapper doesn't copy here.)
+   *   (E.g. GlobalsArray doesn't copy here.)
    */
   DISPATCH(Copy)
 
@@ -563,38 +592,46 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(Escalate)
 
   /*
-   * GetAPCHandle* GetAPCHandle(const ArrayData*)
-   *
-   *   If this array has an associated APCHandle, return it.
-   */
-  DISPATCH(GetAPCHandle)
-
-  /*
    * ArrayData* ZSet{Int,Str}
    * ArrayData* ZAppend
    *
    *   These functions are part of the zend compat layer but their
    *   effects currently aren't documented.
    */
-  { &PackedArray::ZSetInt,
+  {
+    &PackedArray::ZSetInt,
+    &StructArray::ZSetInt,
     &MixedArray::ZSetInt,
     &ZSetIntThrow,
     &ZSetIntThrow,
     &ZSetIntThrow,
-    &ProxyArray::ZSetInt },
-  { &PackedArray::ZSetStr,
+    &ProxyArray::ZSetInt,
+  },
+
+  {
+    &PackedArray::ZSetStr,
+    &StructArray::ZSetStr,
     &MixedArray::ZSetStr,
     &ZSetStrThrow,
     &ZSetStrThrow,
     &ZSetStrThrow,
-    &ProxyArray::ZSetStr },
-  { &PackedArray::ZAppend,
+    &ProxyArray::ZSetStr,
+  },
+
+  {
+    &PackedArray::ZAppend,
+    &StructArray::ZAppend,
     &MixedArray::ZAppend,
     &ZAppendThrow,
     &ZAppendThrow,
     &ZAppendThrow,
-    &ProxyArray::ZAppend },
+    &ProxyArray::ZAppend,
+  },
 };
+
+// We create a copy so that we can install instrumentation shim-functions
+// instrument g_array_funcs at runtime.
+ArrayFunctions g_array_funcs = g_array_funcs_unmodified;
 
 #undef DISPATCH
 
@@ -626,7 +663,7 @@ ArrayData *ArrayData::Create(const Variant& value) {
 ArrayData *ArrayData::Create(const Variant& name, const Variant& value) {
   ArrayInit init(1, ArrayInit::Map{});
   // There is no toKey() call on name.
-  init.set(name, value, true);
+  init.set(name, value);
   return init.create();
 }
 
@@ -655,8 +692,8 @@ int ArrayData::compare(const ArrayData *v2) const {
   if (count1 > count2) return 1;
   if (count1 == 0) return 0;
 
-  // prevent circular referenced objects/arrays or deep ones
-  DECLARE_THREAD_INFO; check_recursion(info);
+  // Prevent circular referenced objects/arrays or deep ones.
+  check_recursion_error();
 
   for (ArrayIter iter(this); iter; ++iter) {
     auto key = iter.first();
@@ -679,8 +716,8 @@ bool ArrayData::equal(const ArrayData *v2, bool strict) const {
   if (count1 != count2) return false;
   if (count1 == 0) return true;
 
-  // prevent circular referenced objects/arrays or deep ones
-  DECLARE_THREAD_INFO; check_recursion(info);
+  // Prevent circular referenced objects/arrays or deep ones.
+  check_recursion_error();
 
   if (strict) {
     for (ArrayIter iter1(this), iter2(v2); iter1; ++iter1, ++iter2) {
@@ -704,23 +741,24 @@ bool ArrayData::equal(const ArrayData *v2, bool strict) const {
 
 Variant ArrayData::reset() {
   setPosition(iter_begin());
-  return m_pos != invalid_index ? getValue(m_pos) : Variant(false);
-}
-
-Variant ArrayData::prev() {
-  if (m_pos != invalid_index) {
-    setPosition(iter_rewind(m_pos));
-    if (m_pos != invalid_index) {
-      return getValue(m_pos);
-    }
-  }
-  return Variant(false);
+  return m_pos != iter_end() ? getValue(m_pos) : Variant(false);
 }
 
 Variant ArrayData::next() {
-  if (m_pos != invalid_index) {
-    setPosition(iter_advance(m_pos));
-    if (m_pos != invalid_index) {
+  // We call iter_advance() without checking if m_pos is the canonical invalid
+  // position. This is okay, since all IterAdvance() impls handle this
+  // correctly, but it means that EmptyArray::IterAdvance() is reachable.
+  setPosition(iter_advance(m_pos));
+  return m_pos != iter_end() ? getValue(m_pos) : Variant(false);
+}
+
+Variant ArrayData::prev() {
+  // We only call iter_rewind() if m_pos is not the canonical invalid position.
+  // Thus, EmptyArray::IterRewind() is not reachable.
+  auto pos_limit = iter_end();
+  if (m_pos != pos_limit) {
+    setPosition(iter_rewind(m_pos));
+    if (m_pos != pos_limit) {
       return getValue(m_pos);
     }
   }
@@ -728,20 +766,20 @@ Variant ArrayData::next() {
 }
 
 Variant ArrayData::end() {
-  setPosition(iter_end());
-  return m_pos != invalid_index ? getValue(m_pos) : Variant(false);
+  setPosition(iter_last());
+  return m_pos != iter_end() ? getValue(m_pos) : Variant(false);
 }
 
 Variant ArrayData::key() const {
-  return m_pos != invalid_index ? getKey(m_pos) : uninit_null();
+  return m_pos != iter_end() ? getKey(m_pos) : uninit_null();
 }
 
 Variant ArrayData::value(int32_t &pos) const {
-  return pos != invalid_index ? getValue(pos) : Variant(false);
+  return pos != iter_end() ? getValue(pos) : Variant(false);
 }
 
 Variant ArrayData::current() const {
-  return m_pos != invalid_index ? getValue(m_pos) : Variant(false);
+  return m_pos != iter_end() ? getValue(m_pos) : Variant(false);
 }
 
 const StaticString
@@ -749,7 +787,7 @@ const StaticString
   s_key("key");
 
 Variant ArrayData::each() {
-  if (m_pos != invalid_index) {
+  if (m_pos != iter_end()) {
     ArrayInit ret(4, ArrayInit::Mixed{});
     Variant key(getKey(m_pos));
     Variant value(getValue(m_pos));
@@ -814,12 +852,12 @@ const Variant& ArrayData::getNotFound(const StringData* k) {
 }
 
 const Variant& ArrayData::getNotFound(int64_t k, bool error) const {
-  return error && m_kind != kNvtwKind ? getNotFound(k) :
+  return error && m_kind != kGlobalsKind ? getNotFound(k) :
          null_variant;
 }
 
 const Variant& ArrayData::getNotFound(const StringData* k, bool error) const {
-  return error && m_kind != kNvtwKind ? getNotFound(k) :
+  return error && m_kind != kGlobalsKind ? getNotFound(k) :
          null_variant;
 }
 
@@ -834,30 +872,17 @@ const Variant& ArrayData::getNotFound(const Variant& k) {
 }
 
 const char* ArrayData::kindToString(ArrayKind kind) {
-  std::array<const char*,6> names = {{
+  std::array<const char*,7> names = {{
     "PackedKind",
+    "StructKind",
     "MixedKind",
-    "SharedKind",
     "EmptyKind",
-    "NvtwKind",
+    "ApcKind",
+    "GlobalsKind",
     "ProxyKind",
   }};
   static_assert(names.size() == kNumKinds, "add new kinds here");
   return names[kind];
-}
-
-void ArrayData::getChildren(std::vector<TypedValue *> &out) {
-  if (isSharedArray()) {
-    APCLocalArray *sm = static_cast<APCLocalArray *>(this);
-    sm->getChildren(out);
-    return;
-  }
-  for (ssize_t pos = iter_begin();
-      pos != ArrayData::invalid_index;
-      pos = iter_advance(pos)) {
-    TypedValue *tv = nvGetValueRef(pos);
-    out.push_back(tv);
-  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

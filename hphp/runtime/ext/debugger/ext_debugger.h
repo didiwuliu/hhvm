@@ -18,13 +18,13 @@
 #ifndef incl_HPHP_EXT_DEBUGGER_H_
 #define incl_HPHP_EXT_DEBUGGER_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-void f_hphpd_break(bool condition = true);
-bool f_hphp_debugger_attached();
+void HHVM_FUNCTION(hphpd_break, bool condition = true);
+bool HHVM_FUNCTION(hphp_debugger_attached);
 Array HHVM_FUNCTION(debugger_get_info);
 
 ///////////////////////////////////////////////////////////////////////////////

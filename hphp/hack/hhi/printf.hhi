@@ -23,12 +23,12 @@
  *
  * and consume an 'int' from the argument list.
  *
- * Hex escapes are used for non-alphabetic charcaters. The '%%'
+ * Hex escapes are used for non-alphabetic characters. The '%%'
  * pseudo-specifier consumes nothing and appears as
  *
  *     function format_0x25() : string;
  *
- * Modifiers and multi-char entires can be encoded by return a new
+ * Modifiers and multi-char entries can be encoded by return a new
  * formatter instead of a string:
  *
  *     function format_upcase_l() : ListFormatter;
@@ -41,18 +41,18 @@
 interface PlainSprintf {
   // It's common to pass floats; would be nice to type this as
   // 'number' once that type becomes available in userland.
-  public function format_d(?mixed $s) : string;
-  public function format_s(?mixed $s) : string;
+  public function format_d(mixed $s) : string;
+  public function format_s(mixed $s) : string;
   public function format_u(?int $s) : string;
   public function format_b(int $s) : string; // bit strings
 
   // Technically %f is locale-dependent (and thus wrong), but we don't.
-  public function format_f(?mixed $s) : string;
+  public function format_f(mixed $s) : string;
   public function format_g(?float $s) : string;
   public function format_upcase_f(?float $s) : string;
   public function format_upcase_e(?float $s) : string;
 
-  public function format_x(?mixed $s) : string;
+  public function format_x(mixed $s) : string;
   public function format_o(?int $s) : string;
   public function format_c(?int $s) : string;
   public function format_upcase_x(?int $s) : string;
@@ -84,6 +84,6 @@ interface SprintfQuote {
   public function format_0x3d() : PlainSprintf;
 }
 
-function sprintf(FormatString<PlainSprintf> $f, ...) : string;
-function printf(FormatString<PlainSprintf> $f, ...) : void;
+function sprintf(\HH\FormatString<PlainSprintf> $f, ...) : string;
+function printf(\HH\FormatString<PlainSprintf> $f, ...) : void;
 

@@ -17,7 +17,8 @@
 #define incl_HPHP_JIT_FUNC_PROLOGUES_X64_H
 
 #include "hphp/util/asm-x64.h"
-#include "hphp/runtime/vm/jit/arch.h"
+#include "hphp/runtime/base/arch.h"
+#include "hphp/runtime/vm/jit/code-gen-x64.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/types.h"
 
@@ -26,7 +27,7 @@ namespace HPHP {
 struct ActRec;
 class Func;
 
-namespace JIT { namespace X64 {
+namespace jit { namespace x64 {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -38,21 +39,21 @@ constexpr auto kFuncGuardLen = 23;
 constexpr auto kFuncGuardShortLen = 14;
 
 template<typename T>
-T* funcPrologueToGuardImm(JIT::TCA prologue) {
-  assert(arch() == Arch::X64);
-  assert(sizeof(T) == 4 || sizeof(T) == 8);
+T* funcPrologueToGuardImm(jit::TCA prologue) {
+  assertx(arch() == Arch::X64);
+  assertx(sizeof(T) == 4 || sizeof(T) == 8);
   T* retval = (T*)(prologue - (sizeof(T) == 8 ?
                                kFuncGuardLen - kFuncMovImm :
                                kFuncGuardShortLen - kFuncCmpImm));
   // We padded these so the immediate would fit inside a cache line
-  assert(((uintptr_t(retval) ^ (uintptr_t(retval + 1) - 1)) &
-          ~(kX64CacheLineSize - 1)) == 0);
+  assertx(((uintptr_t(retval) ^ (uintptr_t(retval + 1) - 1)) &
+          ~kCacheLineMask) == 0);
 
   return retval;
 }
 
-inline bool funcPrologueHasGuard(JIT::TCA prologue, const Func* func) {
-  assert(arch() == Arch::X64);
+inline bool funcPrologueHasGuard(jit::TCA prologue, const Func* func) {
+  assertx(arch() == Arch::X64);
   intptr_t iptr = uintptr_t(func);
   if (deltaFits(iptr, sz::dword)) {
     return *funcPrologueToGuardImm<int32_t>(prologue) == iptr;
@@ -61,8 +62,8 @@ inline bool funcPrologueHasGuard(JIT::TCA prologue, const Func* func) {
 }
 
 inline TCA funcPrologueToGuard(TCA prologue, const Func* func) {
-  assert(arch() == Arch::X64);
-  if (!prologue || prologue == tx->uniqueStubs.fcallHelperThunk) {
+  assertx(arch() == Arch::X64);
+  if (!prologue || prologue == mcg->tx().uniqueStubs.fcallHelperThunk) {
     return prologue;
   }
   return prologue -
@@ -71,7 +72,7 @@ inline TCA funcPrologueToGuard(TCA prologue, const Func* func) {
      kFuncGuardLen);
 }
 
-inline void funcPrologueSmashGuard(JIT::TCA prologue, const Func* func) {
+inline void funcPrologueSmashGuard(jit::TCA prologue, const Func* func) {
   intptr_t iptr = uintptr_t(func);
   if (deltaFits(iptr, sz::dword)) {
     *funcPrologueToGuardImm<int32_t>(prologue) = 0;
@@ -82,7 +83,7 @@ inline void funcPrologueSmashGuard(JIT::TCA prologue, const Func* func) {
 
 //////////////////////////////////////////////////////////////////////
 
-JIT::TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs);
+jit::TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs);
 SrcKey emitFuncPrologue(Func* func, int nPassed, TCA& start);
 SrcKey emitMagicFuncPrologue(Func* func, uint32_t nPassed, TCA& start);
 

@@ -27,18 +27,19 @@ namespace HPHP {
 
 class Array;
 
-class CodeCoverage {
-public:
+struct CodeCoverage {
   void Record(const char* filename, int line0, int line1);
 
-  /**
+  /*
    * Returns an array in this format,
    *
    *  array('filename' => array( line => count, ...))
+   *
+   * If sys is passed as false, systemlib files are not included.
    */
-  Array Report();
+  Array Report(bool sys = true);
 
-  /**
+  /*
    * Write JSON format into the file.
    *
    *  { 'filename': [0, 0, 1, 0, 2, 0], ...}
@@ -47,7 +48,7 @@ public:
    */
   void Report(const std::string& filename);
 
-  /**
+  /*
    * Clear all coverage data.
    */
   void Reset();

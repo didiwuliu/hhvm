@@ -31,16 +31,16 @@ static ProfileStackTrace getStackTrace() {
   ProfileStackTrace trace;
 
   if (g_context.isNull()) return trace;
-  JIT::VMRegAnchor _;
-  ActRec *fp = g_context->getFP();
+  VMRegAnchor _;
+  ActRec *fp = vmfp();
   if (!fp) return trace;
-  PC pc = g_context->getPC();
+  PC pc = vmpc();
 
   const Func *f = fp->m_func;
   Unit *u = f->unit();
   Offset off = pc - u->entry();
   for (;;) {
-    trace.push_back({ f, off });
+    trace.push_back({ f, off, fp->resumed() });
     fp = g_context->getPrevVMState(fp, &off);
     if (!fp) break;
     f = fp->m_func;
@@ -113,7 +113,7 @@ void MemoryProfile::logDeallocationImpl(void *ptr) {
 }
 
 // static
-size_t MemoryProfile::getSizeOfPtr(void *ptr) {
+size_t MemoryProfile::getSizeOfPtr(void* ptr) {
   if (!RuntimeOption::HHProfServerEnabled) return 0;
   const MemoryProfile &mp = *s_memory_profile;
 
@@ -122,10 +122,14 @@ size_t MemoryProfile::getSizeOfPtr(void *ptr) {
 }
 
 // static
-size_t MemoryProfile::getSizeOfTV(TypedValue *tv) {
+size_t MemoryProfile::getSizeOfTV(const TypedValue* tv) {
   if (!RuntimeOption::HHProfServerEnabled) return 0;
 
   switch (tv->m_type) {
+    DT_UNCOUNTED_CASE:
+    case KindOfResource:
+    case KindOfClass:
+      return 0;
     case KindOfString:
       return getSizeOfPtr(tv->m_data.pstr);
     case KindOfArray:
@@ -134,9 +138,8 @@ size_t MemoryProfile::getSizeOfTV(TypedValue *tv) {
       return getSizeOfObject(tv->m_data.pobj);
     case KindOfRef:
       return getSizeOfPtr(tv->m_data.pref);
-    default:
-      return 0;
   }
+  not_reached();
 }
 
 // static

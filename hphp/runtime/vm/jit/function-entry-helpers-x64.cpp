@@ -13,7 +13,7 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/runtime/vm/jit/abi-arm.h"
+
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/event-hook.h"
@@ -22,18 +22,19 @@
 #include "hphp/vixl/a64/simulator-a64.h"
 
 namespace HPHP {
-namespace JIT {
+namespace jit {
 
 static void setupAfterPrologue(ActRec* fp, void* sp) {
-  g_context->m_fp = fp;
-  g_context->m_stack.top() = (Cell*)sp;
+  auto& regs = vmRegsUnsafe();
+  regs.fp = fp;
+  regs.stack.top() = (Cell*)sp;
   int nargs = fp->numArgs();
-  int nparams = fp->m_func->numParams();
+  int nparams = fp->m_func->numNonVariadicParams();
   Offset firstDVInitializer = InvalidAbsoluteOffset;
   if (nargs < nparams) {
     const Func::ParamInfoVec& paramInfo = fp->m_func->params();
     for (int i = nargs; i < nparams; ++i) {
-      Offset dvInitializer = paramInfo[i].funcletOff();
+      Offset dvInitializer = paramInfo[i].funcletOff;
       if (dvInitializer != InvalidAbsoluteOffset) {
         firstDVInitializer = dvInitializer;
         break;
@@ -41,42 +42,37 @@ static void setupAfterPrologue(ActRec* fp, void* sp) {
     }
   }
   if (firstDVInitializer != InvalidAbsoluteOffset) {
-    g_context->m_pc = fp->m_func->unit()->entry() + firstDVInitializer;
+    regs.pc = fp->m_func->unit()->entry() + firstDVInitializer;
   } else {
-    g_context->m_pc = fp->m_func->getEntry();
+    regs.pc = fp->m_func->getEntry();
   }
 }
 
 TCA fcallHelper(ActRec* ar, void* sp) {
   try {
-    assert(!ar->inGenerator());
-    TCA tca =
-      mcg->getFuncPrologue((Func*)ar->m_func, ar->numArgs(), ar);
+    assertx(!ar->resumed());
+    TCA tca = mcg->getFuncPrologue((Func*)ar->m_func, ar->numArgs(), ar);
     if (tca) {
       return tca;
     }
+    /*
+     * If the func is a cloned closure, then the original closure has already
+     * run the prologue, and the prologues array is just being used as entry
+     * points for the dv funclets. Don't run the prologue again.
+     */
     if (!ar->m_func->isClonedClosure()) {
-      /*
-       * If the func is a cloned closure, then the original
-       * closure has already run the prologue, and the prologues
-       * array is just being used as entry points for the
-       * dv funclets. Dont run the prologue again.
-       */
       VMRegAnchor _(ar);
-      uint64_t rip = ar->m_savedRip;
-      if (g_context->doFCall(ar, g_context->m_pc)) {
-        ar->m_savedRip = rip;
-        return tx->uniqueStubs.resumeHelperRet;
+      if (doFCall(ar, vmpc())) {
+        return mcg->tx().uniqueStubs.resumeHelperRet;
       }
-      // We've been asked to skip the function body
-      // (fb_intercept). frame, stack and pc have
-      // already been fixed - flag that with a negative
+      // We've been asked to skip the function body (fb_intercept). frame,
+      // stack and pc have already been fixed - flag that with a negative
       // return address.
-      return (TCA)-rip;
+      return (TCA)-ar->m_savedRip;
     }
     setupAfterPrologue(ar, sp);
-    assert(ar == g_context->m_fp);
-    return tx->uniqueStubs.resumeHelper;
+    assertx(ar == vmRegsUnsafe().fp);
+    return mcg->tx().uniqueStubs.resumeHelper;
   } catch (...) {
     /*
       The return address is set to __fcallHelperThunk,
@@ -97,10 +93,11 @@ TCA fcallHelper(ActRec* ar, void* sp) {
 }
 
 /*
- * This is used to generate an entry point for the entry
- * to a function, after the prologue has run.
+ * This is used to generate an entry point for the entry to a function, after
+ * the prologue has run.
  */
 TCA funcBodyHelper(ActRec* fp, void* sp) {
+  assert_native_stack_aligned();
   setupAfterPrologue(fp, sp);
   tl_regState = VMRegState::CLEAN;
   Func* func = const_cast<Func*>(fp->m_func);
@@ -108,7 +105,7 @@ TCA funcBodyHelper(ActRec* fp, void* sp) {
   TCA tca = mcg->getCallArrayPrologue(func);
 
   if (!tca) {
-    tca = tx->uniqueStubs.resumeHelper;
+    tca = mcg->tx().uniqueStubs.resumeHelper;
   }
   tl_regState = VMRegState::DIRTY;
   return tca;
@@ -121,7 +118,7 @@ int64_t decodeCufIterHelper(Iter* it, TypedValue func) {
   HPHP::Class* cls = nullptr;
   StringData* invName = nullptr;
 
-  auto ar = (ActRec*)framePtr->m_savedRbp;
+  auto ar = framePtr->m_sfp;
   if (LIKELY(ar->m_func->isBuiltin())) {
     ar = g_context->getOuterVMFrame(ar);
   }
@@ -142,4 +139,4 @@ int64_t decodeCufIterHelper(Iter* it, TypedValue func) {
   return true;
 }
 
-} } // HPHP::JIT
+} } // HPHP::jit

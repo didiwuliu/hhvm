@@ -17,14 +17,15 @@
 #ifndef incl_HPHP_VM_CFG_H_
 #define incl_HPHP_VM_CFG_H_
 
-#include <boost/dynamic_bitset.hpp>
-
-#include "hphp/runtime/base/smart-containers.h"
-#include "hphp/runtime/vm/jit/block.h"
-#include "hphp/runtime/vm/jit/ir-unit.h"
+#include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/state-vector.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
+
+struct IRUnit;
+struct Block;
+
+//////////////////////////////////////////////////////////////////////
 
 /**
  * perform a depth-first postorder walk
@@ -33,20 +34,29 @@ template <class Visitor>
 void postorderWalk(const IRUnit&, Visitor visitor, Block* start = nullptr);
 
 /*
+ * Compute a postorder list of the basic blocks reachable from the IR's entry
+ * block.
+ */
+BlockList poSortCfg(const IRUnit&);
+
+/*
  * Compute a reverse postorder list of the basic blocks reachable from
  * the IR's entry block.
  */
 BlockList rpoSortCfg(const IRUnit&);
 
 /*
- * Similar to repoSortCfg, but also returns a StateVector mapping Blocks to
- * their index in the BlockList.
+ * Take a BlockList, and compute a reverse map from blocks to its index in the
+ * list.  Blocks that don't appear in the list will all get the number
+ * std::numeric_limits<uint32_t>::max().
  */
-struct BlocksWithIds {
-  BlockList blocks;
-  StateVector<Block, uint32_t> ids;
-};
-BlocksWithIds rpoSortCfgWithIds(const IRUnit&);
+using BlockIDs = StateVector<Block,uint32_t>;
+BlockIDs numberBlocks(const IRUnit&, const BlockList&);
+
+/*
+ * Split the edge between "from" and "to", returning the new middle block.
+ */
+Block* splitEdge(IRUnit& unit, Block* from, Block* to);
 
 /*
  * Removes unreachable blocks from the unit and then splits any critical edges.
@@ -54,6 +64,13 @@ BlocksWithIds rpoSortCfgWithIds(const IRUnit&);
  * Returns: true iff any modifications were made to the unit.
  */
 bool splitCriticalEdges(IRUnit&);
+
+/*
+ * Inserts a loop pre-header before every loop header that doesn't have one.
+ *
+ * Returns: true iff the unit was changed.
+ */
+bool insertLoopPreHeaders(IRUnit&);
 
 /*
  * Remove unreachable blocks from the given unit.
@@ -66,21 +83,13 @@ bool removeUnreachable(IRUnit& unit);
  * Compute the postorder number of each immediate dominator of each
  * block, using a list produced by rpoSortCfg().
  *
- * Pre: blocks is in reverse postorder
+ * Pre: `blocks' is in a reverse postorder, and `ids' are the rpoIDs for that
+ *      order.
  */
 typedef StateVector<Block,Block*> IdomVector;
-IdomVector findDominators(const IRUnit&, const BlocksWithIds& blocks);
-
-/*
- * A vector of children lists, indexed by block
- */
-typedef StateVector<Block,BlockList> DomChildren;
-
-/*
- * Compute the dominator tree, then populate a list of dominator children
- * for each block.
- */
-DomChildren findDomChildren(const IRUnit&, const BlocksWithIds& blocks);
+IdomVector findDominators(const IRUnit&,
+                          const BlockList& blocks,
+                          const BlockIDs& ids);
 
 /*
  * return true if b1 == b2 or if b1 dominates b2.
@@ -88,15 +97,28 @@ DomChildren findDomChildren(const IRUnit&, const BlocksWithIds& blocks);
 bool dominates(const Block* b1, const Block* b2, const IdomVector& idoms);
 
 /*
- * Visit basic blocks in a preorder traversal over the dominator tree.
- * The state argument is passed by value (copied) as we move down the tree,
- * so each child in the tree gets the state after the parent was processed.
- * The body lambda should take State& (by reference) so it can modify it
- * as each block is processed.
+ * Return true iff the CFG has a backedge.
  */
-template <class State, class Body>
-void forPreorderDoms(Block* block, const DomChildren& children,
-                     State state, Body body);
+bool cfgHasLoop(const IRUnit&);
+
+/*
+ * Finds all the back-edges in a unit.
+ */
+EdgeSet findBackEdges(const IRUnit&);
+
+/*
+ * Finds all the loop headers in a unit.
+ */
+BlockSet findLoopHeaders(const IRUnit&);
+
+/*
+ * Inserts a pre-header before every loop header.
+ *
+ * If the loop header already has a pre-header, then it will not be modified.
+ *
+ * Returns true iff the CFG is changed.
+ */
+bool insertLoopPreHeaders(IRUnit&);
 
 /*
  * Visit the instructions in this blocklist, in block order.
@@ -104,68 +126,10 @@ void forPreorderDoms(Block* block, const DomChildren& children,
 template <class BlockList, class Body>
 void forEachInst(const BlockList& blocks, Body body);
 
-namespace detail {
-   // PostorderSort encapsulates a depth-first postorder walk.
-  template <class Visitor>
-  struct PostorderSort {
-    PostorderSort(Visitor& visitor, unsigned num_blocks)
-      : m_visited(num_blocks), m_visitor(visitor)
-    {}
-
-    void walk(Block* block) {
-      if (m_visited.test(block->id())) return;
-      m_visited.set(block->id());
-
-      // Blocks aren't allowed to be empty but this function is used when
-      // printing debug information, so we want to handle invalid Blocks
-      // gracefully.
-      if (!block->empty()) {
-        Block* taken = block->taken();
-        if (taken && !cold(block) && cold(taken)) {
-          walk(taken);
-          taken = nullptr;
-        }
-        if (Block* next = block->next()) walk(next);
-        if (taken) walk(taken);
-      }
-      m_visitor(block);
-    }
-  private:
-    static bool cold(Block* b) { return b->hint() == Block::Hint::Unlikely; }
-  private:
-    boost::dynamic_bitset<> m_visited;
-    Visitor &m_visitor;
-  };
-}
-
-/**
- * Perform a depth-first postorder walk. If a starting Block is not supplied,
- * unit's entry Block will be used.
- */
-template <class Visitor>
-void postorderWalk(const IRUnit& unit, Visitor visitor, Block* start) {
-  detail::PostorderSort<Visitor> ps(visitor, unit.numBlocks());
-  ps.walk(start ? start : unit.entry());
-}
-
-template <class State, class Body>
-void forPreorderDoms(Block* block, const DomChildren& children,
-                     State state, Body body) {
-  body(block, state);
-  for (Block* child : children[block]) {
-    forPreorderDoms(child, children, state, body);
-  }
-}
-
-template <class BlockList, class Body>
-void forEachInst(const BlockList& blocks, Body body) {
-  for (Block* block : blocks) {
-    for (IRInstruction& inst : *block) {
-      body(&inst);
-    }
-  }
-}
+//////////////////////////////////////////////////////////////////////
 
 }}
+
+#include "hphp/runtime/vm/jit/cfg-inl.h"
 
 #endif

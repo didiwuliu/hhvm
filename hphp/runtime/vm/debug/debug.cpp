@@ -30,7 +30,7 @@
 #include <cxxabi.h>
 #include <bfd.h>
 
-using namespace HPHP::JIT;
+using namespace HPHP::jit;
 
 namespace HPHP {
 namespace Debug {
@@ -43,17 +43,39 @@ DebugInfo* DebugInfo::Get() {
 }
 
 DebugInfo::DebugInfo() {
-  snprintf(m_perfMapName,
-           sizeof m_perfMapName,
-           "/tmp/perf-%d.map", getpid());
-  m_perfMap = fopen(m_perfMapName, "w");
+  m_perfMapName = folly::sformat("/tmp/perf-{}.map", getpid());
+  if (RuntimeOption::EvalPerfPidMap) {
+    m_perfMap = fopen(m_perfMapName.c_str(), "w");
+  }
+  m_dataMapName = folly::sformat("/tmp/perf-data-{}.map", getpid());
+  if (RuntimeOption::EvalPerfDataMap) {
+    m_dataMap = fopen(m_dataMapName.c_str(), "w");
+  }
+  m_relocMapName = folly::sformat("/tmp/hhvm-reloc-{}.map", getpid());
+  if (RuntimeOption::EvalPerfRelocate) {
+    m_relocMap = fopen(m_relocMapName.c_str(), "w+");
+  }
   generatePidMapOverlay();
 }
 
 DebugInfo::~DebugInfo() {
-  if (m_perfMap) fclose(m_perfMap);
-  if (!RuntimeOption::EvalKeepPerfPidMap) {
-    unlink(m_perfMapName);
+  if (m_perfMap) {
+    fclose(m_perfMap);
+    if (!RuntimeOption::EvalKeepPerfPidMap) {
+      unlink(m_perfMapName.c_str());
+    }
+  }
+
+  if (m_dataMap) {
+    fclose(m_dataMap);
+    if (!RuntimeOption::EvalKeepPerfPidMap) {
+      unlink(m_dataMapName.c_str());
+    }
+  }
+
+  if (m_relocMap) {
+    fclose(m_relocMap);
+    unlink(m_relocMapName.c_str());
   }
 }
 
@@ -134,8 +156,8 @@ void DebugInfo::generatePidMapOverlay() {
 }
 
 void DebugInfo::recordStub(TCRange range, const char* name) {
-  if (range.isAstubs()) {
-    m_astubsDwarfInfo.addTracelet(range, name, nullptr, nullptr, false, false);
+  if (range.isAcold()) {
+    m_acoldDwarfInfo.addTracelet(range, name, nullptr, nullptr, false, false);
   } else {
     m_aDwarfInfo.addTracelet(range, name, nullptr, nullptr, false, false);
   }
@@ -161,10 +183,10 @@ void DebugInfo::recordBCInstr(TCRange range, uint32_t op) {
 #undef O
   };
 
-  static const char* astubOpcodeName[] = {
-    "OpAstubStart",
+  static const char* acoldOpcodeName[] = {
+    "OpAcoldStart",
 #define O(name, imm, push, pop, flags) \
-#name "-Astub",
+#name "-Acold",
     OPCODES
 #undef O
   };
@@ -183,28 +205,52 @@ void DebugInfo::recordBCInstr(TCRange range, uint32_t op) {
     const char* name;
     if (op < Op_count) {
       name = opcodeName[op];
-    } else if (op < OpAstubCount) {
-      name = astubOpcodeName[op - OpAstubStart];
+    } else if (op < OpAcoldCount) {
+      name = acoldOpcodeName[op - OpAcoldStart];
     } else {
       name = highOpcodeName[op - OpHighStart];
     }
     fprintf(m_perfMap, "%lx %x %s\n",
             uintptr_t(range.begin()), range.size(), name);
+    fflush(m_perfMap);
   }
 }
 
 void DebugInfo::recordTracelet(TCRange range, const Func* func,
     const Op* instr, bool exit, bool inPrologue) {
-  if (range.isAstubs()) {
-    m_astubsDwarfInfo.addTracelet(range, nullptr, func, instr, exit, inPrologue);
+  if (range.isAcold()) {
+    m_acoldDwarfInfo.addTracelet(range, nullptr, func,
+                                  instr, exit, inPrologue);
   } else {
     m_aDwarfInfo.addTracelet(range, nullptr, func, instr, exit, inPrologue);
   }
 }
 
+void DebugInfo::recordDataMap(void* from, void* to, const std::string& desc) {
+  if (!mcg) return;
+  if (auto* dataMap = Get()->m_dataMap) {
+    fprintf(dataMap, "%" PRIxPTR " %" PRIx64 " %s\n",
+            uintptr_t(from),
+            uint64_t((char*)to - (char*)from),
+            desc.c_str());
+    fflush(dataMap);
+  }
+}
+
+void DebugInfo::recordRelocMap(void* from, void* to,
+                               const String& transInfo) {
+  if (m_relocMap) {
+    fprintf(m_relocMap, "%" PRIxPTR " %" PRIx64 " %s\n",
+            uintptr_t(from),
+            uintptr_t(to),
+            transInfo.c_str());
+    fflush(m_relocMap);
+  }
+}
+
 void DebugInfo::debugSync() {
   m_aDwarfInfo.syncChunks();
-  m_astubsDwarfInfo.syncChunks();
+  m_acoldDwarfInfo.syncChunks();
 }
 
 std::string lookupFunction(const Func* f,

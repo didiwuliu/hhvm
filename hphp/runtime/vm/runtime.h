@@ -16,27 +16,27 @@
 #ifndef incl_HPHP_VM_RUNTIME_H_
 #define incl_HPHP_VM_RUNTIME_H_
 
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/async-generator.h"
+#include "hphp/runtime/ext/std/ext_std_errorfunc.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/resumable.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/stats.h"
 
 namespace HPHP {
 
 struct HhbcExtFuncInfo;
 struct HhbcExtClassInfo;
 
-ObjectData* newVectorHelper(int nElms);
-ObjectData* newMapHelper(int nElms);
-ObjectData* newSetHelper(int nElms);
-ObjectData* newImmVectorHelper(int nElms);
-ObjectData* newImmMapHelper(int nElms);
-ObjectData* newImmSetHelper(int nElms);
-ObjectData* newPairHelper();
-
 StringData* concat_is(int64_t v1, StringData* v2);
 StringData* concat_si(StringData* v1, int64_t v2);
 StringData* concat_ss(StringData* v1, StringData* v2);
+StringData* concat_s3(StringData* v1, StringData* v2, StringData* v3);
+StringData* concat_s4(StringData* v1, StringData* v2,
+                      StringData* v3, StringData* v4);
 
 void print_string(StringData* s);
 void print_int(int64_t i);
@@ -45,6 +45,7 @@ void print_boolean(bool val);
 void raiseWarning(const StringData* sd);
 void raiseNotice(const StringData* sd);
 void raiseArrayIndexNotice(int64_t index);
+void raiseArrayKeyNotice(const StringData* key);
 
 inline Iter*
 frame_iter(const ActRec* fp, int i) {
@@ -65,12 +66,46 @@ frame_local_inner(const ActRec* fp, int n) {
   return ret->m_type == KindOfRef ? ret->m_data.pref->tv() : ret;
 }
 
-inline c_Continuation*
-frame_continuation(const ActRec* fp) {
-  auto arOffset = c_Continuation::getArOffset();
-  ObjectData* obj = (ObjectData*)((char*)fp - arOffset);
-  assert(obj->getVMClass() == c_Continuation::classof());
-  return static_cast<c_Continuation*>(obj);
+inline Resumable*
+frame_resumable(const ActRec* fp) {
+  assert(fp->resumed());
+  return (Resumable*)((char*)fp - Resumable::arOff());
+}
+
+inline c_AsyncFunctionWaitHandle*
+frame_afwh(const ActRec* fp) {
+  assert(fp->func()->isAsyncFunction());
+  auto resumable = frame_resumable(fp);
+  auto arOffset = c_AsyncFunctionWaitHandle::arOff();
+  auto waitHandle = (c_AsyncFunctionWaitHandle*)((char*)resumable - arOffset);
+  assert(waitHandle->getVMClass() == c_AsyncFunctionWaitHandle::classof());
+  return waitHandle;
+}
+
+inline BaseGenerator*
+frame_base_generator(const ActRec* fp) {
+  assert(fp->func()->isGenerator());
+  auto resumable = frame_resumable(fp);
+  auto obj = (ObjectData*)((char*)resumable - BaseGenerator::resumableOff());
+  assert(obj->getVMClass() == c_AsyncGenerator::classof() ||
+         obj->getVMClass() == c_Generator::classof());
+  return static_cast<BaseGenerator*>(obj);
+}
+
+inline c_Generator*
+frame_generator(const ActRec* fp) {
+  assert(fp->func()->isNonAsyncGenerator());
+  auto obj = frame_base_generator(fp);
+  assert(obj->getVMClass() == c_Generator::classof());
+  return static_cast<c_Generator*>(obj);
+}
+
+inline c_AsyncGenerator*
+frame_async_generator(const ActRec* fp) {
+  assert(fp->func()->isAsyncGenerator());
+  auto obj = frame_base_generator(fp);
+  assert(obj->getVMClass() == c_AsyncGenerator::classof());
+  return static_cast<c_AsyncGenerator*>(obj);
 }
 
 /*
@@ -98,9 +133,9 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
     // Free extra args
     assert(fp->hasExtraArgs());
     ExtraArgs* ea = fp->getExtraArgs();
-    int numExtra = fp->numArgs() - fp->m_func->numParams();
+    int numExtra = fp->numArgs() - fp->m_func->numNonVariadicParams();
     if (unwinding) {
-      fp->initNumArgs(fp->m_func->numParams());
+      fp->setNumArgs(fp->m_func->numParams());
       fp->setVarEnv(nullptr);
     }
     ExtraArgs::deallocate(ea, numExtra);
@@ -125,6 +160,7 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
 template<bool unwinding>
 void ALWAYS_INLINE
 frame_free_locals_inl_no_hook(ActRec* fp, int numLocals) {
+  frame_free_locals_helper_inl<unwinding>(fp, numLocals);
   if (fp->hasThis()) {
     ObjectData* this_ = fp->getThis();
     if (unwinding) {
@@ -132,13 +168,12 @@ frame_free_locals_inl_no_hook(ActRec* fp, int numLocals) {
     }
     decRefObj(this_);
   }
-  frame_free_locals_helper_inl<unwinding>(fp, numLocals);
 }
 
 void ALWAYS_INLINE
 frame_free_locals_inl(ActRec* fp, int numLocals, TypedValue* rv) {
   frame_free_locals_inl_no_hook<false>(fp, numLocals);
-  EventHook::FunctionExit(fp, rv);
+  EventHook::FunctionReturn(fp, *rv);
 }
 
 void ALWAYS_INLINE
@@ -148,19 +183,19 @@ frame_free_inl(ActRec* fp, TypedValue* rv) { // For frames with no locals
   assert(fp->m_varEnv == nullptr);
   assert(fp->hasThis());
   decRefObj(fp->getThis());
-  EventHook::FunctionExit(fp, rv);
+  EventHook::FunctionReturn(fp, *rv);
 }
 
 void ALWAYS_INLINE
-frame_free_locals_unwind(ActRec* fp, int numLocals) {
+frame_free_locals_unwind(ActRec* fp, int numLocals, const Fault& fault) {
   frame_free_locals_inl_no_hook<true>(fp, numLocals);
-  EventHook::FunctionExit(fp, nullptr);
+  EventHook::FunctionUnwind(fp, fault);
 }
 
 void ALWAYS_INLINE
 frame_free_locals_no_this_inl(ActRec* fp, int numLocals, TypedValue* rv) {
   frame_free_locals_helper_inl<false>(fp, numLocals);
-  EventHook::FunctionExit(fp, rv);
+  EventHook::FunctionReturn(fp, *rv);
 }
 
 // Helper for iopFCallBuiltin.
@@ -193,7 +228,10 @@ inline ObjectData*
 newInstance(Class* cls) {
   assert(cls);
   auto* inst = ObjectData::newInstance(cls);
-  if (UNLIKELY(RuntimeOption::EnableObjDestructCall)) {
+  Stats::inc(cls->getDtor() ? Stats::ObjectData_new_dtor_yes
+                            : Stats::ObjectData_new_dtor_no);
+
+  if (UNLIKELY(RuntimeOption::EnableObjDestructCall && cls->getDtor())) {
     g_context->m_liveBCObjs.insert(inst);
   }
   return inst;
@@ -212,12 +250,10 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
  * be set up before you use those parts of the runtime.
  */
 
-typedef String (*CompileStringAST)(String, String);
 typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*);
 typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
 typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
 
-extern CompileStringAST g_hphp_compiler_serialize_code_model_for;
 extern CompileStringFn g_hphp_compiler_parse;
 extern BuildNativeFuncUnitFn g_hphp_build_native_func_unit;
 extern BuildNativeClassUnitFn g_hphp_build_native_class_unit;
@@ -228,23 +264,8 @@ void assertTv(const TypedValue* tv);
 // returns the number of things it put on sp
 int init_closure(ActRec* ar, TypedValue* sp);
 
-void defClsHelper(PreClass*);
-
-/*
- * Returns whether the interface named `s' supports any non-object
- * types.
- */
-bool interface_supports_non_objects(const StringData* s);
-
-bool interface_supports_array(const StringData* s);
-bool interface_supports_string(const StringData* s);
-bool interface_supports_int(const StringData* s);
-bool interface_supports_double(const StringData* s);
-
-bool interface_supports_array(std::string const&);
-bool interface_supports_string(std::string const&);
-bool interface_supports_int(std::string const&);
-bool interface_supports_double(std::string const&);
+int64_t zero_error_level();
+void restore_error_level(int64_t oldLevel);
 
 }
 #endif

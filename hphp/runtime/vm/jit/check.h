@@ -17,39 +17,34 @@
 #ifndef incl_HPHP_VM_CHECK_H_
 #define incl_HPHP_VM_CHECK_H_
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
+///////////////////////////////////////////////////////////////////////////////
 
-class IRUnit;
+struct IRInstruction;
+struct IRUnit;
 struct RegAllocInfo;
 
 /*
- * Ensure valid SSA properties; each SSATmp must be defined exactly once,
- * only used in positions dominated by the definition.
+ * Ensure valid SSA properties; each SSATmp must be defined exactly once, only
+ * used in positions dominated by the definition.
  */
 bool checkCfg(const IRUnit&);
 
 /*
- * We can't have SSATmps spanning php-level calls, except for frame
- * pointers and constant values.
+ * We can't have SSATmps spanning php-level calls, except for frame pointers
+ * and constant values.
  *
- * We have no callee-saved registers in php, and there'd be nowhere to
- * spill these because all translations share the spill space.
+ * We have no callee-saved registers in php, and there'd be nowhere to spill
+ * these because all translations share the spill space.
  */
 bool checkTmpsSpanningCalls(const IRUnit&);
 
 /*
- * Make sure there's no shuffle instructions. (called right before register
- * allocation.
+ * Check that an instruction has operands of allowed types.
  */
-bool checkNoShuffles(const IRUnit&);
+bool checkOperandTypes(const IRInstruction*, const IRUnit* unit = nullptr);
 
-/*
- * Check register and spill slot assignments; registers and spill slots must
- * contain the correct SSATmp value at every point of use.
- */
-bool checkRegisters(const IRUnit&, const RegAllocInfo&);
-
+///////////////////////////////////////////////////////////////////////////////
 }}
 
 #endif

@@ -3,137 +3,131 @@ DOMCdataSection
 Warning: DOMCdataSection::__construct() expects exactly 1 parameter, 0 given in %s/test/quick/builtin_extensions.inc on line 5
 object(DOMCdataSection)#1 (0) {
 }
-string(100) "O:26:"__PHP_Unserializable_Class":1:{s:31:"__PHP_Unserializable_Class_Name";s:15:"DOMCdataSection";}"
-object(__PHP_Unserializable_Class)#2 (1) {
-  ["__PHP_Unserializable_Class_Name"]=>
-  string(15) "DOMCdataSection"
-}
-array(28) {
+
+Warning: Attempted to serialize unserializable builtin class DOMCdataSection in %s/test/quick/builtin_extensions.inc on line 8
+string(2) "N;"
+NULL
+array(27) {
   [0]=>
   string(11) "__construct"
   [1]=>
-  string(5) "__get"
+  string(11) "__debuginfo"
   [2]=>
-  string(5) "__set"
-  [3]=>
-  string(7) "__isset"
-  [4]=>
   string(28) "isWhitespaceInElementContent"
-  [5]=>
+  [3]=>
+  string(26) "isElementContentWhitespace"
+  [4]=>
   string(9) "splitText"
-  [6]=>
+  [5]=>
   string(10) "appendData"
-  [7]=>
+  [6]=>
   string(10) "deleteData"
-  [8]=>
+  [7]=>
   string(10) "insertData"
-  [9]=>
+  [8]=>
   string(11) "replaceData"
-  [10]=>
+  [9]=>
   string(13) "substringData"
-  [11]=>
+  [10]=>
   string(11) "appendChild"
-  [12]=>
+  [11]=>
   string(9) "cloneNode"
-  [13]=>
+  [12]=>
   string(9) "getLineNo"
-  [14]=>
+  [13]=>
   string(13) "hasAttributes"
-  [15]=>
+  [14]=>
   string(13) "hasChildNodes"
-  [16]=>
+  [15]=>
   string(12) "insertBefore"
-  [17]=>
+  [16]=>
   string(18) "isDefaultNamespace"
-  [18]=>
+  [17]=>
   string(10) "isSameNode"
-  [19]=>
+  [18]=>
   string(11) "isSupported"
-  [20]=>
+  [19]=>
   string(18) "lookupNamespaceUri"
-  [21]=>
+  [20]=>
   string(12) "lookupPrefix"
-  [22]=>
+  [21]=>
   string(9) "normalize"
-  [23]=>
+  [22]=>
   string(11) "removeChild"
-  [24]=>
+  [23]=>
   string(12) "replaceChild"
-  [25]=>
+  [24]=>
   string(4) "c14n"
-  [26]=>
+  [25]=>
   string(8) "c14nfile"
-  [27]=>
+  [26]=>
   string(11) "getNodePath"
 }
 ================
 A_DOMCdataSection
 
 Warning: DOMCdataSection::__construct() expects exactly 1 parameter, 0 given in %s/test/quick/builtin_extensions.inc on line 23
-object(A_DOMCdataSection)#3 (1) {
+object(A_DOMCdataSection)#2 (1) {
   ["___x"]=>
   NULL
 }
-string(102) "O:26:"__PHP_Unserializable_Class":1:{s:31:"__PHP_Unserializable_Class_Name";s:17:"A_DOMCdataSection";}"
-object(__PHP_Unserializable_Class)#4 (1) {
-  ["__PHP_Unserializable_Class_Name"]=>
-  string(17) "A_DOMCdataSection"
-}
-array(28) {
+
+Warning: Attempted to serialize unserializable builtin class A_DOMCdataSection in %s/test/quick/builtin_extensions.inc on line 26
+string(2) "N;"
+NULL
+array(27) {
   [0]=>
   string(11) "__construct"
   [1]=>
-  string(5) "__get"
+  string(11) "__debuginfo"
   [2]=>
-  string(5) "__set"
-  [3]=>
-  string(7) "__isset"
-  [4]=>
   string(28) "isWhitespaceInElementContent"
-  [5]=>
+  [3]=>
+  string(26) "isElementContentWhitespace"
+  [4]=>
   string(9) "splitText"
-  [6]=>
+  [5]=>
   string(10) "appendData"
-  [7]=>
+  [6]=>
   string(10) "deleteData"
-  [8]=>
+  [7]=>
   string(10) "insertData"
-  [9]=>
+  [8]=>
   string(11) "replaceData"
-  [10]=>
+  [9]=>
   string(13) "substringData"
-  [11]=>
+  [10]=>
   string(11) "appendChild"
-  [12]=>
+  [11]=>
   string(9) "cloneNode"
-  [13]=>
+  [12]=>
   string(9) "getLineNo"
-  [14]=>
+  [13]=>
   string(13) "hasAttributes"
-  [15]=>
+  [14]=>
   string(13) "hasChildNodes"
-  [16]=>
+  [15]=>
   string(12) "insertBefore"
-  [17]=>
+  [16]=>
   string(18) "isDefaultNamespace"
-  [18]=>
+  [17]=>
   string(10) "isSameNode"
-  [19]=>
+  [18]=>
   string(11) "isSupported"
-  [20]=>
+  [19]=>
   string(18) "lookupNamespaceUri"
-  [21]=>
+  [20]=>
   string(12) "lookupPrefix"
-  [22]=>
+  [21]=>
   string(9) "normalize"
-  [23]=>
+  [22]=>
   string(11) "removeChild"
-  [24]=>
+  [23]=>
   string(12) "replaceChild"
-  [25]=>
+  [24]=>
   string(4) "c14n"
-  [26]=>
+  [25]=>
   string(8) "c14nfile"
-  [27]=>
+  [26]=>
   string(11) "getNodePath"
 }

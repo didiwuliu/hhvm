@@ -1,5 +1,5 @@
 <?hh
-// Copyright 2004-present Facebook. All Rights Reserved.
+
 
 async function static_result_create($result) {
   return $result;
@@ -41,7 +41,7 @@ function main() {
   $srwh = null; // Let it go
 
   // Confirm that we can't deserialize one of these as well.
-  $c1 = unserialize("O:12:\"Continuation\":0:{}");
+  $c1 = unserialize("O:9:\"Generator\":0:{}");
   var_dump($c1);
 }
 
